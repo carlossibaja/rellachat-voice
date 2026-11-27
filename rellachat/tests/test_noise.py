@@ -29,9 +29,10 @@ def test_without_pyrnnoise_the_call_runs_unfiltered_and_warns_once(monkeypatch):
     assert len(warnings) == 1
 
 
-def test_the_vad_is_stricter_than_pipecat_defaults():
+def test_the_vad_keeps_pipecat_defaults_so_short_answers_are_heard():
+    # RNNoise already lowers the caller's level; a stricter VAD missed answers like "sí"
     params = bot.CALLER_VAD_PARAMS
 
-    assert params.confidence > VAD_CONFIDENCE
-    assert params.min_volume > VAD_MIN_VOLUME
-    assert params.start_secs > VAD_START_SECS
+    assert params.confidence == VAD_CONFIDENCE
+    assert params.min_volume == VAD_MIN_VOLUME
+    assert params.start_secs == VAD_START_SECS

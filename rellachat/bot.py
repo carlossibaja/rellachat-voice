@@ -95,9 +95,9 @@ class WhatsAppLeg:
     call_id: str
 
 
-# Silero VAD for phone audio: stricter than Pipecat 1.17's defaults (confidence 0.7, start 0.2 s,
-# min volume 0.6) so background noise and far voices do not open a user turn
-CALLER_VAD_PARAMS = VADParams(confidence=0.8, start_secs=0.3, min_volume=0.7)
+# Silero VAD at Pipecat's defaults: RNNoise already lowers the level of the caller's audio, so a stricter
+# min_volume/confidence stopped detecting short answers ("sí") and the turn never ended.
+CALLER_VAD_PARAMS = VADParams()
 
 _noise_filter_warned = False
 
