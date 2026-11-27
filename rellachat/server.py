@@ -257,7 +257,9 @@ def create_app(
         assert state.clients is not None
         client = state.clients.get_or_create(credentials.phone_number_id, credentials.token)
         try:
-            await call.apply_answer(body.sdp, body.type, WhatsAppLeg(client=client, call_id=body.wa_call_id))
+            await call.apply_answer(
+                body.sdp, body.type, WhatsAppLeg(client=client, call_id=body.wa_call_id)
+            )
         except AnswerNotExpectedError:
             raise HTTPException(status_code=409, detail="Call is not waiting for an answer")
         except Exception as e:
@@ -316,7 +318,9 @@ def create_app(
         if pending:
             # Never connected: nothing to summarize. Background: the API is waiting on this request.
             summary = (
-                UNANSWERED_SUMMARY if pending.direction == "outbound" else PHONE_NOT_CONNECTED_SUMMARY
+                UNANSWERED_SUMMARY
+                if pending.direction == "outbound"
+                else PHONE_NOT_CONNECTED_SUMMARY
             )
             state.spawn(state.api.ended(call_uuid, [], summary, 0), f"phone-ended-{call_uuid}")
         return {"ok": True, "found": pending is not None}

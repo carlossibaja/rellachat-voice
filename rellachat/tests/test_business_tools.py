@@ -32,7 +32,11 @@ BOOK = {
 
 AVAILABILITY = {
     "type": "function",
-    "function": {"name": "consultar_disponibilidad", "description": "Horas libres.", "parameters": {"type": "object", "properties": {}}},
+    "function": {
+        "name": "consultar_disponibilidad",
+        "description": "Horas libres.",
+        "parameters": {"type": "object", "properties": {}},
+    },
 }
 
 
@@ -51,7 +55,10 @@ def test_definitions_become_function_schemas():
 
 
 def test_invalid_duplicate_and_reserved_definitions_are_skipped():
-    reserved = [{"type": "function", "function": {"name": name, "parameters": {}}} for name in RESERVED_NAMES]
+    reserved = [
+        {"type": "function", "function": {"name": name, "parameters": {}}}
+        for name in RESERVED_NAMES
+    ]
     bad = [{}, {"function": "x"}, {"function": {"name": "Bad-Name"}}, "nope"]
 
     schemas = function_schemas([*reserved, *bad, AVAILABILITY, AVAILABILITY])
@@ -93,7 +100,9 @@ class FakeClient:
         return False
 
     async def post(self, url, json, headers):
-        FakeClient.calls.append({"url": url, "json": json, "headers": headers, "timeout": self.timeout})
+        FakeClient.calls.append(
+            {"url": url, "json": json, "headers": headers, "timeout": self.timeout}
+        )
         if isinstance(FakeClient.reply, Exception):
             raise FakeClient.reply
         return FakeClient.reply
@@ -110,7 +119,9 @@ def test_run_tool_posts_the_arguments_and_returns_the_api_result(fake_http):
     fake_http.reply = httpx.Response(200, json={"ok": True, "cita_id": 7})
     api = RellachatApi("http://api.test/api/", "s3cret")
 
-    result = asyncio.run(api.run_tool("calls/u-1/tools", "agendar_cita", {"inicio": "2026-10-15 09:30"}))
+    result = asyncio.run(
+        api.run_tool("calls/u-1/tools", "agendar_cita", {"inicio": "2026-10-15 09:30"})
+    )
 
     assert result == {"ok": True, "cita_id": 7}
     call = fake_http.calls[0]
@@ -133,7 +144,9 @@ def test_run_tool_posts_the_arguments_and_returns_the_api_result(fake_http):
 def test_run_tool_failures_are_an_error_for_the_model(fake_http, reply):
     fake_http.reply = reply
 
-    result = asyncio.run(RellachatApi("http://api.test/api", "s").run_tool("calls/u-1/tools", "agendar_cita", {}))
+    result = asyncio.run(
+        RellachatApi("http://api.test/api", "s").run_tool("calls/u-1/tools", "agendar_cita", {})
+    )
 
     assert result["ok"] is False
     assert result["error"]
@@ -141,14 +154,20 @@ def test_run_tool_failures_are_an_error_for_the_model(fake_http, reply):
 
 def test_run_tool_without_api_url_or_a_bad_path_sends_nothing(fake_http):
     assert asyncio.run(RellachatApi("", "s").run_tool("calls/u/tools", "x", {}))["ok"] is False
-    assert asyncio.run(RellachatApi("http://api.test", "s").run_tool("../x", "x", {}))["ok"] is False
+    assert (
+        asyncio.run(RellachatApi("http://api.test", "s").run_tool("../x", "x", {}))["ok"] is False
+    )
     assert asyncio.run(RellachatApi("http://api.test", "s").run_tool(None, "x", {}))["ok"] is False
     assert fake_http.calls == []
 
 
 def test_the_prompt_explains_the_business_tools_and_carries_the_api_rules():
     prompt = build_system_prompt(
-        agent(tools=[BOOK, AVAILABILITY], tools_prompt="AGENDA:\n- Fecha y hora actual del negocio: miércoles 2026-10-14 09:10", tools_path="calls/u/tools")
+        agent(
+            tools=[BOOK, AVAILABILITY],
+            tools_prompt="AGENDA:\n- Fecha y hora actual del negocio: miércoles 2026-10-14 09:10",
+            tools_path="calls/u/tools",
+        )
     )
 
     assert "Herramientas del negocio" in prompt
@@ -162,7 +181,10 @@ def test_the_prompt_explains_the_business_tools_and_carries_the_api_rules():
 
 
 def test_messaging_tools_tell_the_caller_it_goes_to_whatsapp_and_tests_are_simulated():
-    send = {"type": "function", "function": {"name": "enviar_producto", "parameters": {"type": "object", "properties": {}}}}
+    send = {
+        "type": "function",
+        "function": {"name": "enviar_producto", "parameters": {"type": "object", "properties": {}}},
+    }
 
     prompt = build_system_prompt(agent(tools=[send]), test_mode=True)
 
@@ -176,7 +198,13 @@ def test_without_tools_the_prompt_has_no_business_section():
 
 def test_the_agent_config_accepts_the_api_tool_fields():
     config = AgentConfig.model_validate(
-        {"id": 1, "tools": [BOOK], "tools_prompt": "x", "tools_path": "calls/u/tools", "appointment_duration_minutes": 30}
+        {
+            "id": 1,
+            "tools": [BOOK],
+            "tools_prompt": "x",
+            "tools_path": "calls/u/tools",
+            "appointment_duration_minutes": 30,
+        }
     )
 
     assert config.tools == [BOOK]

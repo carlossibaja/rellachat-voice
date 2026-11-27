@@ -170,7 +170,10 @@ def test_greeting_uses_configured_or_default():
 def test_greeting_fills_the_client_placeholder():
     greeting = "hola {{cliente}}, soy Sofía"
     assert build_greeting(agent(greeting=greeting), "Carlos Sibaja") == "hola Carlos, soy Sofía"
-    assert build_greeting(agent(greeting="Hola {{ Cliente }}, ¿cómo estás?"), "Ana") == "Hola Ana, ¿cómo estás?"
+    assert (
+        build_greeting(agent(greeting="Hola {{ Cliente }}, ¿cómo estás?"), "Ana")
+        == "Hola Ana, ¿cómo estás?"
+    )
     # Unknown caller: the placeholder goes away without leaving stray punctuation
     assert build_greeting(agent(greeting="hola {{cliente}}, soy Sofía"), None) == "hola, soy Sofía"
     assert build_greeting(agent(greeting="Hola {{nombre}}. ¿Qué tal?"), "  ") == "Hola. ¿Qué tal?"

@@ -33,7 +33,10 @@ SECRET = {"X-Voice-Secret": "s3cret"}
 
 
 def tool(name: str) -> dict:
-    return {"type": "function", "function": {"name": name, "parameters": {"type": "object", "properties": {}}}}
+    return {
+        "type": "function",
+        "function": {"name": name, "parameters": {"type": "object", "properties": {}}},
+    }
 
 
 ALL_TOOLS = [
@@ -171,7 +174,9 @@ def test_the_phone_prompt_keeps_identity_purpose_and_call_goal():
     assert "Estás llamando" in outbound
     assert "Objetivo de esta llamada" not in outbound
     with_goal = build_system_prompt(
-        phone_agent(base_agent(transport="phone", call_instructions="Ofrece la promo."), "outbound"),
+        phone_agent(
+            base_agent(transport="phone", call_instructions="Ofrece la promo."), "outbound"
+        ),
         initiated_by="Carlos",
     )
     assert "Ofrece la promo." in with_goal
@@ -532,7 +537,9 @@ def test_cancel_drops_a_connected_phone_call_without_ended(client):
 
 
 def test_cancel_refuses_a_whatsapp_call(client):
-    client.service.calls["wa-1"] = FakePhoneCall(agent=base_agent(), call_uuid="wa-1", serializer=None)
+    client.service.calls["wa-1"] = FakePhoneCall(
+        agent=base_agent(), call_uuid="wa-1", serializer=None
+    )
     assert client.post("/phone/calls/wa-1/cancel", headers=SECRET).status_code == 409
 
 

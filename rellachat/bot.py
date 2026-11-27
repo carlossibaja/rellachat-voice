@@ -41,17 +41,17 @@ from pipecat.processors.aggregators.llm_response_universal import (
 )
 from pipecat.services.anthropic.llm import AnthropicLLMService
 from pipecat.services.cartesia.stt import CartesiaSTTService
-from pipecat.turns.empty_user_turn import EmptyUserTurnConfig
-from pipecat.turns.user_start.min_words_user_turn_start_strategy import (
-    MinWordsUserTurnStartStrategy,
-)
-from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.llm_service import FunctionCallParams
 from pipecat.transcriptions.language import Language
 from pipecat.transports.base_transport import TransportParams
 from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
+from pipecat.turns.empty_user_turn import EmptyUserTurnConfig
+from pipecat.turns.user_start.min_words_user_turn_start_strategy import (
+    MinWordsUserTurnStartStrategy,
+)
+from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.workers.runner import WorkerRunner
 
 from rellachat.api_client import RellachatApi
@@ -217,7 +217,11 @@ class VoiceCall:
             api_key=self.settings.cartesia_api_key,
             settings=CartesiaSTTService.Settings(
                 language=language,
-                **({"model": self.settings.cartesia_stt_model} if self.settings.cartesia_stt_model else {}),
+                **(
+                    {"model": self.settings.cartesia_stt_model}
+                    if self.settings.cartesia_stt_model
+                    else {}
+                ),
             ),
         )
         tts = CartesiaTTSService(
@@ -342,7 +346,9 @@ class VoiceCall:
                     start=[MinWordsUserTurnStartStrategy(min_words=INTERRUPT_MIN_WORDS)]
                 ),
                 # Never go silent after a few unrecognized turns: keep asking the caller to repeat
-                empty_user_turn=EmptyUserTurnConfig(max_consecutive_recoveries=EMPTY_TURN_RECOVERIES),
+                empty_user_turn=EmptyUserTurnConfig(
+                    max_consecutive_recoveries=EMPTY_TURN_RECOVERIES
+                ),
             ),
         )
 
@@ -422,7 +428,9 @@ class VoiceCall:
             # The context starts with the outbound marker; the AI introduces itself and the reason
             await self._worker.queue_frames([LLMRunFrame()])
             return
-        await self._worker.queue_frames([TTSSpeakFrame(build_greeting(self.agent, self.contact_name))])
+        await self._worker.queue_frames(
+            [TTSSpeakFrame(build_greeting(self.agent, self.contact_name))]
+        )
 
     # --------------------------------------------------------------- outbound
 

@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from pipecat.frames.frames import LLMRunFrame, TTSSpeakFrame
 from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
 
-from rellachat.bot import VoiceCall, WhatsAppLeg
+from rellachat.bot import AnswerNotExpectedError, VoiceCall, WhatsAppLeg
 from rellachat.config import Settings
 from rellachat.models import AgentConfig, OutboundOfferRequest
 from rellachat.outbound import (
@@ -249,7 +249,7 @@ def test_answer_applies_the_customer_sdp_and_keeps_the_meta_call():
         await call.apply_answer("v=0\r\n", "answer", leg)
         assert connection.answers == [("v=0\r\n", "answer")]
         assert call.whatsapp is leg
-        with pytest.raises(Exception):
+        with pytest.raises(AnswerNotExpectedError):
             await call.apply_answer("v=0\r\n", "answer", leg)
 
     asyncio.run(scenario())
@@ -258,10 +258,13 @@ def test_answer_applies_the_customer_sdp_and_keeps_the_meta_call():
 def test_an_inbound_call_rejects_an_sdp_answer():
     async def scenario():
         call = VoiceCall(
-            settings=Settings(), api=FakeApi(), agent=agent(), connection=FakeConnection(),
+            settings=Settings(),
+            api=FakeApi(),
+            agent=agent(),
+            connection=FakeConnection(),
             call_uuid="in-1",
         )
-        with pytest.raises(Exception):
+        with pytest.raises(AnswerNotExpectedError):
             await call.apply_answer("v=0\r\n", "answer", None)
 
     asyncio.run(scenario())
@@ -285,8 +288,11 @@ def test_outbound_media_connected_reports_answered_and_lets_the_ai_open():
 def test_inbound_media_connected_still_speaks_the_greeting():
     async def scenario():
         call = VoiceCall(
-            settings=Settings(), api=FakeApi(), agent=agent(greeting="Hola"),
-            connection=FakeConnection(), call_uuid="in-1",
+            settings=Settings(),
+            api=FakeApi(),
+            agent=agent(greeting="Hola"),
+            connection=FakeConnection(),
+            call_uuid="in-1",
         )
         call._worker = FakeWorker()
         await call._on_media_connected()
@@ -302,7 +308,9 @@ def test_ending_an_answered_outbound_call_terminates_it_at_meta_with_its_wa_call
         api = FakeApi()
         call = outbound_call(api=api)
         client = FakeWhatsAppClient()
-        await call.apply_answer("v=0\r\n", "answer", WhatsAppLeg(client=client, call_id="wacid.OUT"))
+        await call.apply_answer(
+            "v=0\r\n", "answer", WhatsAppLeg(client=client, call_id="wacid.OUT")
+        )
         call._worker = FakeWorker()
         await call._on_media_connected()
         await call.finalize()  # what end_call leads to once the farewell is spoken
@@ -426,8 +434,12 @@ def test_the_offer_forces_the_outbound_direction(client):
 
 
 def test_a_duplicate_offer_is_409(client):
-    assert client.post("/calls/outbound/offer", json=offer_body(), headers=SECRET).status_code == 200
-    assert client.post("/calls/outbound/offer", json=offer_body(), headers=SECRET).status_code == 409
+    assert (
+        client.post("/calls/outbound/offer", json=offer_body(), headers=SECRET).status_code == 200
+    )
+    assert (
+        client.post("/calls/outbound/offer", json=offer_body(), headers=SECRET).status_code == 409
+    )
 
 
 def test_answer_applies_the_sdp_with_a_meta_leg_for_the_wa_call_id(client):
@@ -473,7 +485,11 @@ def test_meta_terminate_ends_an_outbound_call_through_the_normal_flow(client):
         "/calls/terminate",
         json={
             "call_uuid": "out-1",
-            "whatsapp": {"token": "tok", "phone_number_id": "PNID-9", "webhook": terminate_webhook()},
+            "whatsapp": {
+                "token": "tok",
+                "phone_number_id": "PNID-9",
+                "webhook": terminate_webhook(),
+            },
         },
         headers=SECRET,
     )

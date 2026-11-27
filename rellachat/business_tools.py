@@ -32,10 +32,19 @@ def function_schemas(definitions: list[dict[str, Any]] | None) -> list[FunctionS
         if not isinstance(function, dict):
             continue
         name = function.get("name")
-        if not isinstance(name, str) or not _NAME.match(name) or name in RESERVED_NAMES or name in seen:
+        if (
+            not isinstance(name, str)
+            or not _NAME.match(name)
+            or name in RESERVED_NAMES
+            or name in seen
+        ):
             continue
-        parameters = function.get("parameters") if isinstance(function.get("parameters"), dict) else {}
-        properties = parameters.get("properties") if isinstance(parameters.get("properties"), dict) else {}
+        parameters = (
+            function.get("parameters") if isinstance(function.get("parameters"), dict) else {}
+        )
+        properties = (
+            parameters.get("properties") if isinstance(parameters.get("properties"), dict) else {}
+        )
         required = [key for key in parameters.get("required") or [] if key in properties]
         schemas.append(
             FunctionSchema(

@@ -55,7 +55,9 @@ class PendingPhoneCall:
 class PhoneCallRegistry:
     """Prepared phone calls waiting for Telnyx to open their media stream."""
 
-    def __init__(self, ttl: float = PHONE_STREAM_TTL_SECS, clock: Callable[[], float] = time.monotonic):
+    def __init__(
+        self, ttl: float = PHONE_STREAM_TTL_SECS, clock: Callable[[], float] = time.monotonic
+    ):
         self.ttl = ttl
         self.clock = clock
         self._pending: dict[str, PendingPhoneCall] = {}

@@ -31,7 +31,13 @@ VOICE_STYLE_RULES = """Reglas de estilo para voz (tus respuestas se convierten e
 
 
 CALENDAR_TOOLS = frozenset(
-    {"consultar_disponibilidad", "agendar_cita", "reprogramar_cita", "cancelar_cita", "listar_citas_contacto"}
+    {
+        "consultar_disponibilidad",
+        "agendar_cita",
+        "reprogramar_cita",
+        "cancelar_cita",
+        "listar_citas_contacto",
+    }
 )
 
 MESSAGING_TOOLS = frozenset({"enviar_producto", "enviar_precios", "crear_pedido"})
@@ -72,7 +78,7 @@ def business_tools_section(agent: AgentConfig, *, test_mode: bool = False) -> st
         "instrucciones del negocio, o cuando la persona lo pida. Por ejemplo, un agente de atención "
         "al cliente no ofrece pedidos ni ventas si no se los piden.",
         "- Antes de consultar o hacer algo que la persona pidió, di una frase corta de espera, por "
-        "ejemplo \"déjame revisar\" o \"un momento, lo consulto\", y llama la herramienta en el "
+        'ejemplo "déjame revisar" o "un momento, lo consulto", y llama la herramienta en el '
         "mismo turno. Las herramientas de leads se usan en silencio, sin anunciarlas.",
         "- Nunca digas que hiciste algo hasta que la herramienta responda ok. Si responde con "
         "un error, corrígelo y vuelve a intentarlo, o explícale a la persona con palabras sencillas.",
@@ -81,12 +87,16 @@ def business_tools_section(agent: AgentConfig, *, test_mode: bool = False) -> st
     if names & CALENDAR_TOOLS:
         lines.append(
             "- Puedes consultar la disponibilidad"
-            + (" y agendar, reprogramar o cancelar citas" if names & {"agendar_cita", "reprogramar_cita", "cancelar_cita"} else "")
+            + (
+                " y agendar, reprogramar o cancelar citas"
+                if names & {"agendar_cita", "reprogramar_cita", "cancelar_cita"}
+                else ""
+            )
             + ". Ofrece pocas opciones de horario a la vez (dos o tres), no la lista completa."
         )
         lines.append(
             "- Antes de agendar, reprogramar o cancelar, repítele a la persona el día de la semana, "
-            "la fecha y la hora (por ejemplo \"el jueves 15 de octubre a las nueve y media de la mañana\") "
+            'la fecha y la hora (por ejemplo "el jueves 15 de octubre a las nueve y media de la mañana") '
             "y espera que confirme."
         )
     if agent.is_phone and PRODUCT_SEARCH_TOOL in names:
@@ -94,7 +104,7 @@ def business_tools_section(agent: AgentConfig, *, test_mode: bool = False) -> st
     if names & MESSAGING_TOOLS and not agent.is_phone:
         lines.append(
             "- Los productos, precios y pedidos se envían al chat de WhatsApp de la persona: "
-            "díselo, por ejemplo \"te lo envío por WhatsApp\"."
+            'díselo, por ejemplo "te lo envío por WhatsApp".'
         )
     if test_mode:
         lines.append(
@@ -191,7 +201,11 @@ def build_system_prompt(
             f"Habla siempre en {language_name(agent.language)}, salvo que el cliente use otro idioma."
         )
     else:
-        channel = "Atiendes llamadas telefónicas." if agent.is_phone else "Atiendes llamadas telefónicas por WhatsApp."
+        channel = (
+            "Atiendes llamadas telefónicas."
+            if agent.is_phone
+            else "Atiendes llamadas telefónicas por WhatsApp."
+        )
         parts = [
             f"Eres {identity}, el agente de voz de {company}. {channel}",
             f"Tu propósito principal es {purpose}.",
