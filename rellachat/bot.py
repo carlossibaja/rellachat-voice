@@ -37,6 +37,11 @@ from pipecat.processors.aggregators.llm_response_universal import (
 )
 from pipecat.services.anthropic.llm import AnthropicLLMService
 from pipecat.services.cartesia.stt import CartesiaSTTService
+from pipecat.turns.empty_user_turn import EmptyUserTurnConfig
+from pipecat.turns.user_start.min_words_user_turn_start_strategy import (
+    MinWordsUserTurnStartStrategy,
+)
+from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.llm_service import FunctionCallParams
 from pipecat.transcriptions.language import Language
@@ -61,6 +66,10 @@ from rellachat.summarizer import summarize_call, summarize_for_transfer
 AUDIO_IN_SAMPLE_RATE = 16000
 AUDIO_OUT_SAMPLE_RATE = 24000
 LLM_MAX_TOKENS = 400
+# Words the caller must say before the agent stops talking (one word is enough while it is quiet)
+INTERRUPT_MIN_WORDS = 3
+# Unrecognized turns in a row the agent still answers (asks to repeat) before staying quiet
+EMPTY_TURN_RECOVERIES = 3
 
 
 class CallState(StrEnum):
@@ -235,7 +244,16 @@ class VoiceCall:
         )
         user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
             context,
-            user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
+            user_params=LLMUserAggregatorParams(
+                vad_analyzer=SileroVADAnalyzer(),
+                # Phone audio carries noise and echo: only transcribed words start a turn, and
+                # cutting the agent off mid-sentence takes INTERRUPT_MIN_WORDS.
+                user_turn_strategies=UserTurnStrategies(
+                    start=[MinWordsUserTurnStartStrategy(min_words=INTERRUPT_MIN_WORDS)]
+                ),
+                # Never go silent after a few unrecognized turns: keep asking the caller to repeat
+                empty_user_turn=EmptyUserTurnConfig(max_consecutive_recoveries=EMPTY_TURN_RECOVERIES),
+            ),
         )
 
         pipeline = Pipeline(
