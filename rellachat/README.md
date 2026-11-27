@@ -24,6 +24,8 @@ python rellachat/server.py          # listens on HOST:PORT (default 0.0.0.0:7860
 pytest rellachat/tests              # unit tests, no network or provider calls
 ```
 
+To run it in Docker on a server, see [Docker / deploy](#docker--deploy).
+
 ## Environment (`rellachat/.env`)
 
 | Variable | Default | Purpose |
@@ -39,6 +41,105 @@ pytest rellachat/tests              # unit tests, no network or provider calls
 | `ICE_SERVERS` | Google STUN | A JSON list of URL strings or `{urls, username, credential}` objects. Invalid input falls back to STUN |
 | `TELNYX_API_KEY` | — | Phone calls: lets Pipecat's `TelnyxFrameSerializer` hang up at Telnyx when the agent ends the call. Without it calls still work, but `end_call` cannot hang up |
 | `PUBLIC_WS_BASE_URL` | — | Phone calls: public `wss://` base of this service, for example `wss://voice.example.com`. Telnyx connects to `{base}/phone/ws` directly, so the service must be publicly reachable (tunnel in development). Unset: `/phone/calls/prepare` returns 503 |
+
+## Docker / deploy
+
+The image is defined in `rellachat/Dockerfile`. Its build context is the repository root, because it installs the Pipecat framework from `src/` and `pyproject.toml`. The root `.dockerignore` only lets `pyproject.toml`, `README.md`, `LICENSE`, `MANIFEST.in`, `src/` and `rellachat/` into the context, and never any `.env` file, `.git`, `.venv` or the tests.
+
+What the image does:
+
+- **Two stages on `python:3.12-slim`.** The builder installs `.[anthropic,cartesia,webrtc,runner,silero,rnnoise]` with uv into `/opt/venv`, as a regular (non-editable) install. The runtime stage copies only that venv and `rellachat/`. Every dependency has manylinux wheels for x86_64 and aarch64 (only pure-Python `docopt` is built from source), so no compiler is installed; the runtime only adds `libgomp1`.
+- **Version.** `setuptools_scm` cannot read git tags without `.git`, so the build sets `SETUPTOOLS_SCM_PRETEND_VERSION` from the build arg `PIPECAT_VERSION` (default `1.17.0`). Bump it when the fork moves to a new Pipecat tag: `--build-arg PIPECAT_VERSION=x.y.z`.
+- **Config.** Only environment variables. `config.py` loads `rellachat/.env` only when the file exists and never overrides real variables, so the variables Docker passes are used as they are.
+- **Runtime.** Runs `python rellachat/server.py` as the non-root user `rellachat` (uid 10001), with `PYTHONUNBUFFERED=1`. The `HEALTHCHECK` calls `GET /health` on `127.0.0.1:$PORT`.
+
+### Build and run
+
+With Compose, from `rellachat/` (uses `rellachat/.env`):
+
+```bash
+cp .env.example .env               # then fill in the production values
+docker compose up -d --build
+docker compose logs -f voice
+docker compose ps                  # shows "healthy" once /health answers
+```
+
+Without Compose, from the repository root:
+
+```bash
+docker build -f rellachat/Dockerfile -t rellachat-voice .
+docker run -d --name rellachat-voice --network host --restart unless-stopped \
+  --env-file rellachat/.env rellachat-voice
+```
+
+### Production environment
+
+All variables are in the table above. These are the ones a production server must get right:
+
+| Variable | Production value |
+| --- | --- |
+| `RELLACHAT_API_URL` | The URL of the Rellachat API as this server reaches it, for example `https://api.example.com/api` |
+| `VOICE_SERVICE_SECRET` | The same long random secret the API uses. Unset: every protected endpoint returns 401 |
+| `PUBLIC_WS_BASE_URL` | The public `wss://` base of this service behind the reverse proxy, for example `wss://voice.example.com`. Unset: phone calls are refused with 503 |
+| `TELNYX_API_KEY` | Needed so `end_call` can hang up phone calls at Telnyx |
+| `ICE_SERVERS` | Add a TURN server: STUN alone fails when the caller, the advisor or this server is behind a strict NAT. Single-quote the JSON in the env file: `ICE_SERVERS='[{"urls":"turn:turn.example.com:3478","username":"u","credential":"p"}]'` |
+| `ANTHROPIC_API_KEY`, `CARTESIA_API_KEY`, `CARTESIA_VOICE_ID` | Provider credentials and the default voice |
+| `HOST` / `PORT` | Default `0.0.0.0:7860`. With host networking this is a port on the server itself: firewall it so only the API and the reverse proxy reach it, or set `HOST=127.0.0.1` when both run on the same machine |
+
+### Why host networking
+
+WhatsApp calls and advisor legs are WebRTC through aiortc. aiortc gathers ICE host candidates from the network interfaces it sees and binds a random UDP port per call. On Docker's default bridge network it only sees the container's private IP (`172.17.x.x`), so the SDP advertises an address that Meta and the advisor's browser cannot reach, and media never flows. Publishing a port range does not fix it, because the ports are random and the advertised IP is still wrong. `network_mode: host` (or `--network host`) shares the server's real interfaces, so the advertised candidates are correct.
+
+Consequences:
+
+- Host networking works only on Linux Docker Engine. Docker Desktop on macOS or Windows does not give the container the host's interfaces.
+- `ports:` mappings are ignored; the service binds `HOST:PORT` directly on the server.
+- The server firewall must allow UDP on the ephemeral port range for WebRTC media, or media must go through a TURN server (`ICE_SERVERS`).
+
+Phone calls (Telnyx) do not use WebRTC. They only use the WebSocket `/phone/ws`, which must be reachable through a public HTTPS/WSS reverse proxy.
+
+### Reverse proxy for `/phone/ws`
+
+Telnyx connects to `{PUBLIC_WS_BASE_URL}/phone/ws?call=...&token=...`, so the proxy must terminate TLS and forward the WebSocket upgrade. Keep the query string, and use a long read timeout, because the socket stays open for the whole call.
+
+Caddy (TLS and WebSocket upgrades are automatic):
+
+```caddyfile
+voice.example.com {
+    reverse_proxy 127.0.0.1:7860
+}
+```
+
+nginx:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name voice.example.com;
+    # ssl_certificate / ssl_certificate_key ...
+
+    location /phone/ws {
+        proxy_pass http://127.0.0.1:7860;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    # Optional: the HTTP endpoints, if the API reaches the service through this domain.
+    # They all require X-Voice-Secret; only /phone/ws must be public.
+    location / {
+        proxy_pass http://127.0.0.1:7860;
+        proxy_set_header Host $host;
+    }
+}
+```
+
+### Single replica
+
+All call state is in memory (see Known limitations). Run one container per server, and expect live calls to drop on `docker compose up -d --build` or any restart.
 
 ## Endpoints
 

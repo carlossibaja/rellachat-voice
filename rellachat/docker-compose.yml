@@ -1,0 +1,30 @@
+# Rellachat voice service. Run from this directory (rellachat/):
+#
+#   docker compose up -d --build
+#
+# Host networking is required (Linux only): WhatsApp and advisor media use WebRTC
+# (aiortc), which advertises the container's own IP as ICE host candidates and
+# binds random UDP ports. On a bridge network those candidates are unreachable and
+# media fails. See "Docker / deploy" in README.md.
+
+services:
+  voice:
+    build:
+      context: ..
+      dockerfile: rellachat/Dockerfile
+    image: rellachat-voice:latest
+    env_file: .env
+    network_mode: host
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/health' % os.environ.get('PORT', '7860'), timeout=4)"
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3

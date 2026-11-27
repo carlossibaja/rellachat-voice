@@ -1,0 +1,29 @@
+# Docker build context for rellachat/Dockerfile (context = repository root).
+# Allowlist: ignore everything, then re-include only what the image needs.
+*
+
+!pyproject.toml
+!README.md
+!LICENSE
+!MANIFEST.in
+!src/
+!rellachat/
+
+# Never bake secrets or local state into the image
+.env
+**/.env
+**/.env.*
+!rellachat/.env.example
+
+# Not needed at runtime
+.git
+.venv
+.atl
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.ruff_cache
+rellachat/tests
+rellachat/pytest.ini
+rellachat/Dockerfile
+rellachat/docker-compose.yml
