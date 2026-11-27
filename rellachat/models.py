@@ -31,6 +31,12 @@ class AgentConfig(BaseModel):
     tools: list[dict[str, Any]] = Field(default_factory=list)
     tools_prompt: str | None = None
     tools_path: str | None = None
+    # ``outbound`` when the business places the call (T9); inbound keeps the original behavior
+    direction: str = "inbound"
+
+    @property
+    def is_outbound(self) -> bool:
+        return self.direction == "outbound"
 
     @property
     def ring_seconds(self) -> int:
@@ -67,6 +73,42 @@ class ConnectRequest(BaseModel):
     whatsapp: WhatsAppPayload
     agent: AgentConfig
     contact: Contact = Field(default_factory=Contact)
+
+
+class OutboundWhatsApp(BaseModel):
+    """Meta credentials of the business number placing an outbound call."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    token: str = Field(min_length=1)
+    phone_number_id: str = Field(min_length=1)
+
+
+class Initiator(BaseModel):
+    """Advisor who placed the outbound AI call."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: int | str | None = None
+    name: str | None = None
+
+
+class OutboundOfferRequest(BaseModel):
+    """Body of ``POST /calls/outbound/offer``."""
+
+    call_uuid: str = Field(min_length=1)
+    whatsapp: OutboundWhatsApp
+    agent: AgentConfig
+    contact: Contact = Field(default_factory=Contact)
+    initiated_by: Initiator = Field(default_factory=Initiator)
+
+
+class OutboundAnswerRequest(BaseModel):
+    """Body of ``POST /calls/{call_uuid}/answer``: the customer's SDP answer from Meta."""
+
+    sdp: str = Field(min_length=1)
+    type: str = "answer"
+    wa_call_id: str = Field(min_length=1)
 
 
 class TerminateRequest(BaseModel):

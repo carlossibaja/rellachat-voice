@@ -21,14 +21,18 @@ from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
 from pipecat.transports.whatsapp.api import WhatsAppConnectCall
 
 from rellachat.api_client import RellachatApi
-from rellachat.bot import TransferNotPendingError, VoiceCall, WhatsAppLeg
+from rellachat.bot import AnswerNotExpectedError, TransferNotPendingError, VoiceCall, WhatsAppLeg
 from rellachat.config import Settings, load_env
 from rellachat.models import (
     AdvisorOfferRequest,
     ConnectRequest,
+    OutboundAnswerRequest,
+    OutboundOfferRequest,
+    OutboundWhatsApp,
     TerminateRequest,
     TestOfferRequest,
 )
+from rellachat.outbound import OutboundWebRTCConnection
 from rellachat.security import secret_matches
 from rellachat.whatsapp import (
     InvalidWebhookError,
@@ -51,6 +55,8 @@ class ServiceState:
         self.http: aiohttp.ClientSession | None = None
         self.clients: WhatsAppClientRegistry | None = None
         self.calls: dict[str, VoiceCall] = {}  # call_uuid -> call
+        # Meta credentials of outbound calls, used to terminate them once answered
+        self.outbound: dict[str, OutboundWhatsApp] = {}  # call_uuid -> credentials
         self.test_calls: set[VoiceCall] = set()
         self.tasks: set[asyncio.Task] = set()
 
@@ -61,7 +67,13 @@ class ServiceState:
         return task
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    call_factory=VoiceCall,
+    outbound_connection_factory=OutboundWebRTCConnection,
+) -> FastAPI:
+    """Build the service; the factories are swappable so tests run without media or providers."""
     state = ServiceState(settings or Settings.from_env())
 
     @asynccontextmanager
@@ -95,6 +107,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         finally:
             if call.call_uuid and state.calls.get(call.call_uuid) is call:
                 state.calls.pop(call.call_uuid, None)
+                state.outbound.pop(call.call_uuid, None)
 
     async def answer_whatsapp_call(body: ConnectRequest, request, client) -> None:
         started = False
@@ -179,6 +192,72 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=500, detail="Could not connect the advisor")
         return {"sdp": answer["sdp"], "type": answer.get("type", "answer")}
 
+    # ------------------------------------------------------------ outbound
+
+    @app.post("/calls/outbound/offer", dependencies=[Depends(require_secret)])
+    async def outbound_offer(body: OutboundOfferRequest):
+        """Create the business-side peer and its SDP offer; the API sends it to Meta's connect."""
+        if body.call_uuid in state.calls:
+            raise HTTPException(status_code=409, detail="Call already exists")
+
+        connection = outbound_connection_factory(state.settings.ice_servers)
+        try:
+            offer = await connection.create_offer()
+        except Exception as e:
+            logger.error(f"Call {body.call_uuid}: could not create the SDP offer: {e}")
+            await _disconnect_quietly(connection)
+            raise HTTPException(status_code=500, detail="Could not create the SDP offer")
+
+        if body.call_uuid in state.calls:  # raced with another offer for the same call
+            await _disconnect_quietly(connection)
+            raise HTTPException(status_code=409, detail="Call already exists")
+
+        call = call_factory(
+            settings=state.settings,
+            api=state.api,
+            agent=body.agent.model_copy(update={"direction": "outbound"}),
+            connection=connection,
+            call_uuid=body.call_uuid,
+            whatsapp=None,  # set by /answer, once Meta gives the call id
+            contact_name=body.contact.name,
+            initiated_by=body.initiated_by.name,
+        )
+        state.calls[body.call_uuid] = call
+        state.outbound[body.call_uuid] = body.whatsapp
+        # The pipeline starts now; the AI waits for the customer's media before speaking
+        state.spawn(run_call(call), f"call-{body.call_uuid}")
+        return {"sdp": offer["sdp"], "type": "offer"}
+
+    @app.post("/calls/{call_uuid}/answer", dependencies=[Depends(require_secret)])
+    async def outbound_answer(call_uuid: str, body: OutboundAnswerRequest):
+        """The customer's SDP answer (Meta connect webhook) for an outbound call."""
+        call = state.calls.get(call_uuid)
+        credentials = state.outbound.get(call_uuid)
+        if not call or not credentials:
+            raise HTTPException(status_code=404, detail="Unknown outbound call")
+
+        assert state.clients is not None
+        client = state.clients.get_or_create(credentials.phone_number_id, credentials.token)
+        try:
+            await call.apply_answer(body.sdp, body.type, WhatsAppLeg(client=client, call_id=body.wa_call_id))
+        except AnswerNotExpectedError:
+            raise HTTPException(status_code=409, detail="Call is not waiting for an answer")
+        except Exception as e:
+            logger.error(f"Call {call_uuid}: invalid SDP answer: {e}")
+            raise HTTPException(status_code=422, detail="Invalid SDP answer")
+        return {"ok": True}
+
+    @app.post("/calls/{call_uuid}/cancel", dependencies=[Depends(require_secret)])
+    async def outbound_cancel(call_uuid: str):
+        """Meta never placed the call: tear it down without ``ended``. Unknown calls are ok (idempotent)."""
+        if call_uuid in state.calls and call_uuid not in state.outbound:
+            raise HTTPException(status_code=409, detail="Only outbound calls can be cancelled")
+        call = state.calls.pop(call_uuid, None)
+        state.outbound.pop(call_uuid, None)
+        if call:
+            await call.cancel()
+        return {"ok": True, "found": call is not None}
+
     # ---------------------------------------------------------- browser test
 
     @app.post("/test/offer", dependencies=[Depends(require_secret)])
@@ -212,6 +291,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
 
     return app
+
+
+async def _disconnect_quietly(connection) -> None:
+    try:
+        await connection.disconnect()
+    except Exception as e:
+        logger.debug(f"Peer disconnect failed: {e}")
 
 
 def main() -> None:

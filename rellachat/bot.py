@@ -29,6 +29,7 @@ from pipecat.frames.frames import (
     EndWorkerFrame,
     FunctionCallResultProperties,
     LLMMessagesAppendFrame,
+    LLMRunFrame,
     TTSSpeakFrame,
 )
 from pipecat.pipeline.pipeline import Pipeline
@@ -58,12 +59,14 @@ from rellachat.bridge import AdvisorLeg, AudioInjector, CallerAudioGate, CallerM
 from rellachat.business_tools import function_schemas
 from rellachat.config import Settings
 from rellachat.models import AdvisorUser, AgentConfig
+from rellachat.outbound import ANSWER_TIMEOUT_SECS
 from rellachat.prompts import (
-    CALL_STARTED_MARKER,
     HOLD_MESSAGE,
     NO_ADVISOR_INSTRUCTION,
+    UNANSWERED_SUMMARY,
     build_greeting,
     build_system_prompt,
+    call_started_marker,
 )
 from rellachat.summarizer import summarize_call, summarize_for_transfer
 from rellachat.usage import CallUsage, SttAudioMeter, UsageObserver
@@ -86,6 +89,10 @@ class CallState(StrEnum):
 
 class TransferNotPendingError(Exception):
     """Raised when an advisor offer arrives but no transfer is ringing."""
+
+
+class AnswerNotExpectedError(Exception):
+    """Raised when an SDP answer arrives for an inbound call or one already answered."""
 
 
 @dataclass
@@ -147,6 +154,8 @@ class VoiceCall:
         call_uuid: str | None = None,
         whatsapp: WhatsAppLeg | None = None,
         contact_name: str | None = None,
+        initiated_by: str | None = None,
+        answer_timeout_secs: float = ANSWER_TIMEOUT_SECS,
     ):
         self.settings = settings
         self.api = api
@@ -155,7 +164,11 @@ class VoiceCall:
         self.call_uuid = call_uuid
         self.whatsapp = whatsapp
         self.contact_name = contact_name
+        self.initiated_by = initiated_by
         self.test_mode = call_uuid is None
+        # Outbound: we sent the SDP offer; the customer's answer and media come later
+        self.outbound = agent.is_outbound
+        self.answer_timeout_secs = answer_timeout_secs
 
         self.label = call_uuid or f"test-{connection.pc_id}"
         self.state = CallState.AI
@@ -176,6 +189,10 @@ class VoiceCall:
         self._remote_terminated = False
         self._finalized = False
         self._stop_requested = False
+        self._answer_applied = False
+        self._answer_timer: asyncio.Task | None = None
+        self._unanswered = False
+        self._cancelled = False
 
     # ------------------------------------------------------------------ utils
 
@@ -211,7 +228,12 @@ class VoiceCall:
             api_key=self.settings.anthropic_api_key,
             settings=AnthropicLLMService.Settings(
                 model=self.settings.anthropic_model,
-                system_instruction=build_system_prompt(self.agent, test_mode=self.test_mode),
+                system_instruction=build_system_prompt(
+                    self.agent,
+                    test_mode=self.test_mode,
+                    contact_name=self.contact_name,
+                    initiated_by=self.initiated_by,
+                ),
                 max_tokens=LLM_MAX_TOKENS,
             ),
         )
@@ -256,6 +278,10 @@ class VoiceCall:
 
     async def run(self) -> None:
         """Run the call until either side hangs up, then report it."""
+        if self.outbound:
+            self._answer_timer = asyncio.create_task(
+                self._answer_timeout(self.answer_timeout_secs), name=f"answer-timer-{self.label}"
+            )
         try:
             await self._run_pipeline()
         except Exception as e:
@@ -287,7 +313,7 @@ class VoiceCall:
             )
 
         context = LLMContext(
-            messages=[{"role": "user", "content": CALL_STARTED_MARKER}],
+            messages=[{"role": "user", "content": call_started_marker(self.agent)}],
             tools=self._tools(),
         )
         user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
@@ -335,9 +361,7 @@ class VoiceCall:
 
         @transport.event_handler("on_client_connected")
         async def on_client_connected(_transport, _client):
-            logger.info(f"Call {self.label}: caller media connected")
-            assert self._worker is not None
-            await self._worker.queue_frames([TTSSpeakFrame(build_greeting(self.agent, self.contact_name))])
+            await self._on_media_connected()
 
         @transport.event_handler("on_client_disconnected")
         async def on_client_disconnected(_transport, _client):
@@ -352,13 +376,61 @@ class VoiceCall:
         async def on_assistant_turn_stopped(_aggregator, message):
             self._add_transcript("assistant", message.content, message.timestamp)
 
-        self.answered_at = time.monotonic()
-        if self.call_uuid:
-            self._spawn(self.api.answered(self.call_uuid), "answered")
+        if not self.outbound:
+            # Inbound: Meta's accept already happened, so the call is answered now
+            self._mark_answered()
 
         if self._stop_requested:
             return
         await self._runner.run()
+
+    def _mark_answered(self) -> None:
+        """Start billing time and tell the API (once)."""
+        if self.answered_at is not None:
+            return
+        self.answered_at = time.monotonic()
+        if self._answer_timer:
+            self._answer_timer.cancel()
+            self._answer_timer = None
+        if self.call_uuid:
+            self._spawn(self.api.answered(self.call_uuid), "answered")
+
+    async def _on_media_connected(self) -> None:
+        """Caller media is flowing: inbound speaks the greeting, outbound lets the AI open."""
+        logger.info(f"Call {self.label}: caller media connected")
+        assert self._worker is not None
+        if self.outbound:
+            if self.answered_at is not None:
+                return
+            self._mark_answered()
+            # The context starts with the outbound marker; the AI introduces itself and the reason
+            await self._worker.queue_frames([LLMRunFrame()])
+            return
+        await self._worker.queue_frames([TTSSpeakFrame(build_greeting(self.agent, self.contact_name))])
+
+    # --------------------------------------------------------------- outbound
+
+    async def apply_answer(self, sdp: str, sdp_type: str, whatsapp: WhatsAppLeg) -> None:
+        """Apply the customer's SDP answer and keep Meta's call to terminate it later."""
+        if not self.outbound or self._answer_applied or self._finalized:
+            raise AnswerNotExpectedError()
+        self._answer_applied = True
+        # Set first: a hang-up while the answer is applied must still terminate at Meta
+        self.whatsapp = whatsapp
+        await self.connection.apply_answer(sdp, sdp_type)
+
+    async def _answer_timeout(self, seconds: float) -> None:
+        await asyncio.sleep(seconds)
+        if self.answered_at is None and not self._finalized:
+            logger.info(f"Call {self.label}: not answered in {seconds}s; ending it")
+            self._unanswered = True
+            await self._cancel_runner()
+
+    async def cancel(self) -> None:
+        """Meta never placed the call: tear it down without reporting ``ended``."""
+        self._cancelled = True
+        await self._cancel_runner()
+        await self.finalize()
 
     async def _cancel_runner(self) -> None:
         self._stop_requested = True
@@ -532,6 +604,8 @@ class VoiceCall:
 
         if self._transfer_timer:
             self._transfer_timer.cancel()
+        if self._answer_timer and self._answer_timer is not asyncio.current_task():
+            self._answer_timer.cancel()
         if self._advisor:
             await self._advisor.stop()
 
@@ -547,15 +621,19 @@ class VoiceCall:
         except Exception as e:
             logger.debug(f"Call {self.label}: disconnect failed: {e}")
 
-        if not self.call_uuid:
+        if not self.call_uuid or self._cancelled:
             return
         duration = int(time.monotonic() - self.answered_at) if self.answered_at else 0
-        summary = await summarize_call(
-            self.settings.anthropic_api_key,
-            self.settings.anthropic_model,
-            self.transcript,
-            usage=self.usage,
-        )
+        if self.outbound and self.answered_at is None:
+            # Never answered: no conversation to summarize; the API marks it failed
+            summary = UNANSWERED_SUMMARY
+        else:
+            summary = await summarize_call(
+                self.settings.anthropic_api_key,
+                self.settings.anthropic_model,
+                self.transcript,
+                usage=self.usage,
+            )
         await self.api.ended(
             self.call_uuid, self.transcript, summary, duration, usage=self._usage_payload()
         )

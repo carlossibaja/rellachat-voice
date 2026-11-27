@@ -99,17 +99,55 @@ def language_name(code: str | None) -> str:
     return LANGUAGE_NAMES.get(base, code or "español")
 
 
-def build_system_prompt(agent: AgentConfig, *, test_mode: bool = False) -> str:
-    """Build the system prompt for a call from the agent configuration."""
+def _outbound_lines(
+    identity: str, company: str, contact_name: str | None, initiated_by: str | None
+) -> list[str]:
+    """Who the agent is calling and how it opens a call the business placed."""
+    lines = [
+        f"Eres {identity}, el agente de voz de {company}. Estás llamando por WhatsApp a un "
+        "cliente en nombre de la empresa: tú iniciaste la llamada, el cliente no te llamó.",
+        f"Cuando el cliente conteste, saluda, preséntate como {identity} de {company} y di en una "
+        "o dos frases el motivo de la llamada según tu propósito, las instrucciones del negocio y "
+        "lo que sabes del cliente. Luego espera su respuesta. No preguntes en qué le puedes ayudar "
+        "como si él te hubiera llamado.",
+        "Si no es buen momento para el cliente, ofrece llamar en otro momento o escribirle por "
+        "WhatsApp y despídete.",
+    ]
+    if contact_name and contact_name.strip():
+        lines.append(f"La persona a la que llamas se llama {contact_name.strip()}.")
+    if initiated_by and initiated_by.strip():
+        lines.append(f"Esta llamada la pidió {initiated_by.strip()}, del equipo de {company}.")
+    return lines
+
+
+def build_system_prompt(
+    agent: AgentConfig,
+    *,
+    test_mode: bool = False,
+    contact_name: str | None = None,
+    initiated_by: str | None = None,
+) -> str:
+    """Build the system prompt for a call from the agent configuration.
+
+    ``contact_name`` and ``initiated_by`` are only used by outbound calls; an
+    inbound prompt is the same with or without them.
+    """
     identity = agent.identity_name.strip() or agent.name.strip() or "el asistente virtual"
     company = agent.company_name.strip() or "la empresa"
     purpose = PURPOSE_LABELS.get(agent.purpose, PURPOSE_LABELS["other"])
 
-    parts: list[str] = [
-        f"Eres {identity}, el agente de voz de {company}. Atiendes llamadas telefónicas por WhatsApp.",
-        f"Tu propósito principal es {purpose}.",
-        f"Habla siempre en {language_name(agent.language)}, salvo que quien llama use otro idioma.",
-    ]
+    if agent.is_outbound:
+        parts: list[str] = _outbound_lines(identity, company, contact_name, initiated_by)
+        parts.append(f"Tu propósito principal es {purpose}.")
+        parts.append(
+            f"Habla siempre en {language_name(agent.language)}, salvo que el cliente use otro idioma."
+        )
+    else:
+        parts = [
+            f"Eres {identity}, el agente de voz de {company}. Atiendes llamadas telefónicas por WhatsApp.",
+            f"Tu propósito principal es {purpose}.",
+            f"Habla siempre en {language_name(agent.language)}, salvo que quien llama use otro idioma.",
+        ]
 
     company_lines: list[str] = []
     if agent.company_description and agent.company_description.strip():
@@ -191,6 +229,19 @@ NO_ADVISOR_INSTRUCTION = (
 )
 
 CALL_STARTED_MARKER = "[La llamada se conectó]"
+
+# Outbound: the customer answered; the agent speaks first (opener from the system prompt)
+OUTBOUND_CALL_STARTED_MARKER = (
+    "[El cliente contestó la llamada. Salúdalo, preséntate y dile el motivo de la llamada.]"
+)
+
+# ``ended`` summary of an outbound call nobody answered (the API marks it failed, nothing charged)
+UNANSWERED_SUMMARY = "El cliente no contestó la llamada."
+
+
+def call_started_marker(agent: AgentConfig) -> str:
+    """First context message of a call, by direction."""
+    return OUTBOUND_CALL_STARTED_MARKER if agent.is_outbound else CALL_STARTED_MARKER
 
 
 def format_transcript(transcript: list[dict]) -> str:

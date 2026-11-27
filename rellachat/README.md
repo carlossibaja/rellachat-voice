@@ -49,6 +49,9 @@ Every endpoint except `GET /health` requires the header `X-Voice-Secret`, compar
 | POST | `/calls/terminate` | `{call_uuid, whatsapp:{token?, phone_number_id?, webhook}}` | 200 `{ok, found}` |
 | POST | `/calls/{call_uuid}/advisor-offer` | `{sdp, type?: "offer", user:{id, name}}` | 200 `{sdp, type: "answer"}`. 409 if no transfer is ringing. 500 if the advisor peer failed |
 | POST | `/test/offer` | `{agent, sdp, type?: "offer"}` | 200 `{sdp, type, pc_id}` |
+| POST | `/calls/outbound/offer` | `{call_uuid, whatsapp:{token, phone_number_id}, agent (direction forced to "outbound"), contact, initiated_by:{id, name}}` | 200 `{sdp, type: "offer"}`. 409 if `call_uuid` is already live. 500 if the offer could not be created |
+| POST | `/calls/{call_uuid}/answer` | `{sdp, type?: "answer", wa_call_id}` | 200 `{ok: true}`. 404 if no outbound call has that uuid. 409 if it was already answered. 422 if the SDP is invalid |
+| POST | `/calls/{call_uuid}/cancel` | — | 200 `{ok: true, found}`, idempotent: an unknown or finished call is `found: false`. 409 for an inbound call. Never posts `ended` |
 
 ### How `/calls/connect` works
 
@@ -106,6 +109,17 @@ While a call is bridged, neither the caller nor the advisor is transcribed, so n
 ## Browser test calls (`/test/offer`)
 
 Test calls use the same pipeline over SmallWebRTC, with no WhatsApp leg and no API callbacks: no `answered` and no `ended`. `transfer_to_advisor` is simulated, so the AI says that on a real call it would transfer now.
+
+## Outbound calls (`/calls/outbound/*`)
+
+The business places the call; the API keeps all Meta signaling and the service only does WebRTC.
+
+1. `POST /calls/outbound/offer`: `OutboundWebRTCConnection` (`outbound.py`) subclasses Pipecat's `SmallWebRTCConnection`, which can only answer offers in 1.17. It adds one `sendrecv` audio transceiver to the same aiortc peer, runs `createOffer` + `setLocalDescription` (aiortc gathers every ICE candidate first, so the SDP is complete), and keeps only `sha-256` fingerprints with CRLF endings, the same rule as Pipecat's `_filter_sdp_for_whatsapp` for answers. The call is registered and its pipeline starts, but the AI stays silent.
+2. The API sends that offer to Meta's `connect`. If Meta refuses, the API calls `/cancel`: the call is torn down and no `ended` is posted.
+3. `POST /calls/{uuid}/answer`: the customer's SDP answer is applied, and `wa_call_id` plus the offer's `phone_number_id`/token become the call's WhatsApp leg, so ending it (`end_call`, advisor hang-up, shutdown) terminates at Meta like an inbound call.
+4. When the customer's media connects, the service posts `answered` (billing starts here) and the AI speaks first: the outbound prompt (`agent.direction == "outbound"`) tells it to introduce itself as `identity_name` from the company and say why it calls, from its purpose, instructions and what it knows of the customer.
+5. Nobody answers within 60 s (`ANSWER_TIMEOUT_SECS`): the call is torn down and `ended` is posted with `duration: 0`, no transcript and summary `"El cliente no contestó la llamada."`. Without a `wa_call_id` the service cannot terminate the ringing call at Meta; the API must do it when it gets that `ended`.
+6. Meta's `terminate` (customer hung up or rejected) arrives through the normal `/calls/terminate` forward and runs the normal end flow.
 
 ## Decisions and contract notes for the API and the web
 
