@@ -15,6 +15,8 @@ from loguru import logger
 from pipecat.transports.smallwebrtc.connection import IceServer
 
 ENV_FILE = Path(__file__).resolve().parent / ".env"
+# Also accepted: the repo root .env (git-ignored), for setups that keep it next to pyproject.toml
+ROOT_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
 
 DEFAULT_ANTHROPIC_MODEL = "claude-haiku-5-5"
 DEFAULT_PORT = 7860
@@ -22,9 +24,10 @@ DEFAULT_ICE_SERVERS = [IceServer(urls="stun:stun.l.google.com:19302")]
 
 
 def load_env() -> None:
-    """Load ``rellachat/.env`` if present without overriding real env vars."""
-    if ENV_FILE.exists():
-        load_dotenv(ENV_FILE, override=False)
+    """Load ``rellachat/.env``, then the repo root ``.env``, without overriding real env vars."""
+    for env_file in (ENV_FILE, ROOT_ENV_FILE):
+        if env_file.exists():
+            load_dotenv(env_file, override=False)
 
 
 def parse_ice_servers(raw: str | None) -> list[IceServer]:
