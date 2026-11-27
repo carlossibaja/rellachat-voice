@@ -11,7 +11,7 @@ Run these from the repository root with Python 3.12 and [uv](https://docs.astral
 ```bash
 uv venv --python 3.12
 source .venv/bin/activate
-uv pip install -e ".[anthropic,cartesia,webrtc,runner,silero]" pytest
+uv pip install -e ".[anthropic,cartesia,webrtc,runner,silero,rnnoise]" pytest
 cp rellachat/.env.example rellachat/.env   # then fill in the values
 ```
 

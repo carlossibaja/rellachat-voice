@@ -12,6 +12,7 @@ Transfer states::
 """
 
 import asyncio
+import importlib.util
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -21,7 +22,9 @@ from typing import Any
 from loguru import logger
 from pipecat.adapters.llm.schemas.function_schema import FunctionSchema
 from pipecat.adapters.llm.schemas.tools_schema import ToolsSchema
+from pipecat.audio.filters.base_audio_filter import BaseAudioFilter
 from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.frames.frames import (
     EndWorkerFrame,
     FunctionCallResultProperties,
@@ -90,6 +93,29 @@ class WhatsAppLeg:
 
     client: Any  # pipecat WhatsAppClient
     call_id: str
+
+
+# Silero VAD for phone audio: stricter than Pipecat 1.17's defaults (confidence 0.7, start 0.2 s,
+# min volume 0.6) so background noise and far voices do not open a user turn
+CALLER_VAD_PARAMS = VADParams(confidence=0.8, start_secs=0.3, min_volume=0.7)
+
+_noise_filter_warned = False
+
+
+def caller_audio_filter() -> BaseAudioFilter | None:
+    """RNNoise noise suppression for the caller's audio, or None when pyrnnoise is missing."""
+    global _noise_filter_warned
+    try:
+        if importlib.util.find_spec("pyrnnoise") is None:
+            raise ImportError("pyrnnoise is not installed")
+        from pipecat.audio.filters.rnnoise_filter import RNNoiseFilter
+
+        return RNNoiseFilter()
+    except Exception as e:
+        if not _noise_filter_warned:
+            _noise_filter_warned = True
+            logger.warning(f"Noise suppression disabled (install the rnnoise extra): {e}")
+        return None
 
 
 def to_language(code: str | None) -> Language:
@@ -234,7 +260,11 @@ class VoiceCall:
     async def _run_pipeline(self) -> None:
         transport = SmallWebRTCTransport(
             webrtc_connection=self.connection,
-            params=TransportParams(audio_in_enabled=True, audio_out_enabled=True),
+            params=TransportParams(
+                audio_in_enabled=True,
+                audio_out_enabled=True,
+                audio_in_filter=caller_audio_filter(),
+            ),
         )
         stt, tts, llm = self._build_services()
 
@@ -257,7 +287,7 @@ class VoiceCall:
         user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
             context,
             user_params=LLMUserAggregatorParams(
-                vad_analyzer=SileroVADAnalyzer(),
+                vad_analyzer=SileroVADAnalyzer(params=CALLER_VAD_PARAMS),
                 # Phone audio carries noise and echo: only transcribed words start a turn, and
                 # cutting the agent off mid-sentence takes INTERRUPT_MIN_WORDS.
                 user_turn_strategies=UserTurnStrategies(
