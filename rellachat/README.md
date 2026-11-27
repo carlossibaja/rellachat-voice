@@ -76,7 +76,8 @@ SmallWebRTC input → CallerAudioGate → Cartesia STT → user aggregator (Sile
 - **Transcript.** Each user and assistant turn is stored as `{role, text, at}`. Advisor events are stored as `advisor` markers.
 - **API callbacks.** All are best-effort: failures are logged and never end the call.
   - `answered`: when the bot starts.
-  - `ended {transcript, summary, duration}`: exactly once, after either side hangs up or after `end_call`. The summary is a short Spanish text generated with the Anthropic Messages API.
+  - `ended {transcript, summary, duration, usage}`: exactly once, after either side hangs up or after `end_call`. The summary is a short Spanish text generated with the Anthropic Messages API.
+  - `usage` (billing, `usage.py`): `{ llm: [{model, input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens}], stt_seconds, tts_characters }`, one LLM entry per model. LLM tokens and TTS characters come from Pipecat's `LLMUsageMetricsData` / `TTSUsageMetricsData` (`enable_usage_metrics=True`, collected by `UsageObserver`); the transfer and end-of-call summaries add their own Anthropic `usage`. STT seconds are metered by `SttAudioMeter` from the caller audio that reaches Cartesia STT (Pipecat's own STT usage flush runs at cancel, after observers stop, so a hang-up would lose its tail). Usage that cannot be built is omitted; it never blocks `ended`.
 - **Hang-up.** When the AI ends the call, it also terminates the WhatsApp leg through Meta. It skips that step when Meta already sent `terminate`.
 
 ## Live transfer and the bridge (`bridge.py`)

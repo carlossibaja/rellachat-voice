@@ -66,6 +66,7 @@ from rellachat.prompts import (
     build_system_prompt,
 )
 from rellachat.summarizer import summarize_call, summarize_for_transfer
+from rellachat.usage import CallUsage, SttAudioMeter, UsageObserver
 
 AUDIO_IN_SAMPLE_RATE = 16000
 AUDIO_OUT_SAMPLE_RATE = 24000
@@ -160,6 +161,8 @@ class VoiceCall:
         self.state = CallState.AI
         self.transcript: list[dict] = []
         self.answered_at: float | None = None
+        # What the call consumed, reported on ``ended`` for billing
+        self.usage = CallUsage(default_model=settings.anthropic_model)
 
         self._gate = CallerAudioGate(name=f"caller-gate-{self.label}")
         self._caller_injector = AudioInjector(
@@ -305,6 +308,7 @@ class VoiceCall:
             [
                 transport.input(),
                 self._gate,
+                SttAudioMeter(self.usage.add_input_audio, name=f"stt-meter-{self.label}"),
                 stt,
                 user_aggregator,
                 llm,
@@ -320,7 +324,9 @@ class VoiceCall:
                 audio_in_sample_rate=AUDIO_IN_SAMPLE_RATE,
                 audio_out_sample_rate=AUDIO_OUT_SAMPLE_RATE,
                 enable_metrics=True,
+                enable_usage_metrics=True,
             ),
+            observers=[UsageObserver(self.usage)],
             # Bridged calls carry no STT/TTS activity; hang-ups end the call instead.
             idle_timeout_secs=None,
         )
@@ -415,7 +421,10 @@ class VoiceCall:
         if reason:
             history.append({"role": "assistant", "text": f"Motivo de la transferencia: {reason}"})
         summary = await summarize_for_transfer(
-            self.settings.anthropic_api_key, self.settings.anthropic_model, history
+            self.settings.anthropic_api_key,
+            self.settings.anthropic_model,
+            history,
+            usage=self.usage,
         )
         if self.state != CallState.TRANSFER_PENDING:
             return
@@ -506,6 +515,14 @@ class VoiceCall:
         """Stop the call from our side (e.g. server shutdown)."""
         await self._cancel_runner()
 
+    def _usage_payload(self) -> dict | None:
+        """The call's usage for billing; None (field omitted) if it cannot be built."""
+        try:
+            return self.usage.to_payload()
+        except Exception as e:
+            logger.warning(f"Call {self.label}: usage report unavailable: {e}")
+            return None
+
     async def finalize(self) -> None:
         """Tear down both legs and report the call to the API (exactly once)."""
         if self._finalized:
@@ -534,7 +551,12 @@ class VoiceCall:
             return
         duration = int(time.monotonic() - self.answered_at) if self.answered_at else 0
         summary = await summarize_call(
-            self.settings.anthropic_api_key, self.settings.anthropic_model, self.transcript
+            self.settings.anthropic_api_key,
+            self.settings.anthropic_model,
+            self.transcript,
+            usage=self.usage,
         )
-        await self.api.ended(self.call_uuid, self.transcript, summary, duration)
+        await self.api.ended(
+            self.call_uuid, self.transcript, summary, duration, usage=self._usage_payload()
+        )
         logger.info(f"Call {self.label}: ended after {duration}s")

@@ -61,13 +61,22 @@ class RellachatApi:
         return await self._post(call_uuid, "transferred", {"user_id": user_id})
 
     async def ended(
-        self, call_uuid: str, transcript: list[dict], summary: str, duration: int
+        self,
+        call_uuid: str,
+        transcript: list[dict],
+        summary: str,
+        duration: int,
+        usage: dict[str, Any] | None = None,
     ) -> bool:
-        return await self._post(
-            call_uuid,
-            "ended",
-            {"transcript": transcript, "summary": summary, "duration": duration},
-        )
+        payload: dict[str, Any] = {
+            "transcript": transcript,
+            "summary": summary,
+            "duration": duration,
+        }
+        if usage is not None:
+            # Billing (T8): LLM tokens per model, STT seconds, TTS characters
+            payload["usage"] = usage
+        return await self._post(call_uuid, "ended", payload)
 
     async def run_tool(
         self, tools_path: str | None, name: str, arguments: dict[str, Any] | None
