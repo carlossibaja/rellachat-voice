@@ -265,7 +265,7 @@ def test_connect_rejects_invalid_webhook(client):
 def test_the_stt_model_comes_from_the_environment(monkeypatch):
     from rellachat.config import Settings
 
-    monkeypatch.setenv("CARTESIA_STT_MODEL", " ink-2 ")
-    assert Settings.from_env().cartesia_stt_model == "ink-2"
+    monkeypatch.setenv("CARTESIA_STT_MODEL", " ink-whisper ")
+    assert Settings.from_env().cartesia_stt_model == "ink-whisper"
     monkeypatch.delenv("CARTESIA_STT_MODEL")
-    assert Settings.from_env().cartesia_stt_model == ""
+    assert Settings.from_env().cartesia_stt_model == "ink-2"

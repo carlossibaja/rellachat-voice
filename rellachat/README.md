@@ -32,7 +32,7 @@ pytest rellachat/tests              # unit tests, no network or provider calls
 | `ANTHROPIC_MODEL` | `claude-haiku-5-5` | Model for the conversation and the summaries |
 | `CARTESIA_API_KEY` | — | Cartesia STT and TTS |
 | `CARTESIA_VOICE_ID` | — | Default voice, used when the agent has no `voice_id` |
-| `CARTESIA_STT_MODEL` | Pipecat default (`ink-whisper`) | Cartesia speech-to-text model, e.g. `ink-2` |
+| `CARTESIA_STT_MODEL` | `ink-2` | Cartesia speech-to-text model (`ink-whisper` is the older one) |
 | `RELLACHAT_API_URL` | — | For example `http://localhost:8000/api`. Callbacks go to `{url}/voice-service/...` |
 | `VOICE_SERVICE_SECRET` | — | Shared secret, sent and checked in `X-Voice-Secret`. If it is unset, every protected endpoint returns 401 |
 | `PORT` / `HOST` | `7860` / `0.0.0.0` | HTTP bind address |
