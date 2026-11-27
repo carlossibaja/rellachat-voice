@@ -260,3 +260,12 @@ def test_connect_rejects_invalid_webhook(client):
         headers={"X-Voice-Secret": "s3cret"},
     )
     assert response.status_code == 422
+
+
+def test_the_stt_model_comes_from_the_environment(monkeypatch):
+    from rellachat.config import Settings
+
+    monkeypatch.setenv("CARTESIA_STT_MODEL", " ink-2 ")
+    assert Settings.from_env().cartesia_stt_model == "ink-2"
+    monkeypatch.delenv("CARTESIA_STT_MODEL")
+    assert Settings.from_env().cartesia_stt_model == ""

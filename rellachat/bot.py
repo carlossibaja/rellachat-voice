@@ -192,7 +192,10 @@ class VoiceCall:
         language = to_language(self.agent.language)
         stt = CartesiaSTTService(
             api_key=self.settings.cartesia_api_key,
-            settings=CartesiaSTTService.Settings(language=language),
+            settings=CartesiaSTTService.Settings(
+                language=language,
+                **({"model": self.settings.cartesia_stt_model} if self.settings.cartesia_stt_model else {}),
+            ),
         )
         tts = CartesiaTTSService(
             api_key=self.settings.cartesia_api_key,

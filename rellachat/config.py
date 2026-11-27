@@ -71,6 +71,8 @@ class Settings:
     anthropic_model: str = DEFAULT_ANTHROPIC_MODEL
     cartesia_api_key: str = ""
     cartesia_voice_id: str = ""
+    # Cartesia STT model; empty keeps Pipecat's default (ink-whisper). Try "ink-2" for faster turn ends.
+    cartesia_stt_model: str = ""
     rellachat_api_url: str = ""
     voice_service_secret: str = ""
     port: int = DEFAULT_PORT
@@ -89,6 +91,7 @@ class Settings:
             anthropic_model=os.getenv("ANTHROPIC_MODEL") or DEFAULT_ANTHROPIC_MODEL,
             cartesia_api_key=os.getenv("CARTESIA_API_KEY", ""),
             cartesia_voice_id=os.getenv("CARTESIA_VOICE_ID", ""),
+            cartesia_stt_model=(os.getenv("CARTESIA_STT_MODEL") or "").strip(),
             rellachat_api_url=(os.getenv("RELLACHAT_API_URL") or "").rstrip("/"),
             voice_service_secret=os.getenv("VOICE_SERVICE_SECRET", ""),
             port=port,
