@@ -43,10 +43,10 @@ jobs:
           uv pip install -e ".[anthropic,cartesia,webrtc,runner,silero,rnnoise]" pytest ruff
 
       - name: Ruff formatter
-        run: uv run ruff format --diff rellachat
+        run: .venv/bin/ruff format --diff rellachat
 
       - name: Ruff linter
-        run: uv run ruff check rellachat
+        run: .venv/bin/ruff check rellachat
 
       - name: Tests
-        run: uv run pytest rellachat/tests -q
+        run: .venv/bin/python -m pytest rellachat/tests -q
