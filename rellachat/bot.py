@@ -76,9 +76,9 @@ AUDIO_OUT_SAMPLE_RATE = 24000
 # Thinking counts toward this cap: at 200 the model sometimes spent it all thinking and replied with no
 # text (the agent went silent). Brevity comes from the prompt's style rules, not from this cap.
 LLM_MAX_TOKENS = 400
-# Words the caller must say before the agent stops talking: one, so a "sí" or "espera" cuts it off
-# (interim transcripts count, so it stops as soon as the first word is recognized)
-INTERRUPT_MIN_WORDS = 1
+# Words the caller must say before the agent stops talking: two, so "sí, espera" cuts it off but a single
+# word transcribed from background noise (a fan) does not. Interim transcripts count, so it stops fast.
+INTERRUPT_MIN_WORDS = 2
 # Unrecognized turns in a row the agent still answers (asks to repeat) before staying quiet
 EMPTY_TURN_RECOVERIES = 3
 
