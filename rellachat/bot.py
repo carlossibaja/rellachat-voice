@@ -52,6 +52,7 @@ from pipecat.workers.runner import WorkerRunner
 
 from rellachat.api_client import RellachatApi
 from rellachat.bridge import AdvisorLeg, AudioInjector, CallerAudioGate, CallerMode
+from rellachat.business_tools import function_schemas
 from rellachat.config import Settings
 from rellachat.models import AdvisorUser, AgentConfig
 from rellachat.prompts import (
@@ -214,7 +215,12 @@ class VoiceCall:
                     required=["reason"],
                 )
             )
+        tools.extend(self._business_tools())
         return ToolsSchema(standard_tools=tools)
+
+    def _business_tools(self) -> list[FunctionSchema]:
+        """The agent's Rellachat tools (calendar, products, orders, leads) the API sent."""
+        return function_schemas(self.agent.tools)
 
     async def run(self) -> None:
         """Run the call until either side hangs up, then report it."""
@@ -236,6 +242,12 @@ class VoiceCall:
         if self.agent.transfer_enabled:
             llm.register_function(
                 "transfer_to_advisor", self._handle_transfer, cancel_on_interruption=False
+            )
+
+        # Not cancelled on interruption: a booking the caller talks over must still finish
+        for schema in self._business_tools():
+            llm.register_function(
+                schema.name, self._handle_business_tool, cancel_on_interruption=False
             )
 
         context = LLMContext(
@@ -326,6 +338,12 @@ class VoiceCall:
         )
         # Pushed after the farewell text, so the TTS audio is flushed before ending.
         await params.llm.push_frame(EndWorkerFrame(reason="end_call"))
+
+    async def _handle_business_tool(self, params: FunctionCallParams) -> None:
+        """Runs a business tool through the API; its result (or an error) goes back to the model."""
+        arguments = params.arguments if isinstance(params.arguments, dict) else {}
+        result = await self.api.run_tool(self.agent.tools_path, params.function_name, arguments)
+        await params.result_callback(result)
 
     async def _handle_transfer(self, params: FunctionCallParams) -> None:
         reason = str((params.arguments or {}).get("reason") or "").strip()

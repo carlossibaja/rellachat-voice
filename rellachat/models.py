@@ -25,6 +25,12 @@ class AgentConfig(BaseModel):
     voice_id: str | None = None
     transfer_enabled: bool = True
     transfer_ring_seconds: int | None = DEFAULT_TRANSFER_RING_SECONDS
+    appointment_duration_minutes: int | None = None
+    # Business tools (OpenAI function definitions), what the model must know to use them, and
+    # the API path they run through (``calls/{uuid}/tools`` or a test session's path)
+    tools: list[dict[str, Any]] = Field(default_factory=list)
+    tools_prompt: str | None = None
+    tools_path: str | None = None
 
     @property
     def ring_seconds(self) -> int:

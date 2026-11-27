@@ -28,6 +28,69 @@ VOICE_STYLE_RULES = """Reglas de estilo para voz (tus respuestas se convierten e
 - Sé cordial, claro y breve. Evita respuestas de más de dos o tres oraciones."""
 
 
+CALENDAR_TOOLS = frozenset(
+    {"consultar_disponibilidad", "agendar_cita", "reprogramar_cita", "cancelar_cita", "listar_citas_contacto"}
+)
+
+MESSAGING_TOOLS = frozenset({"enviar_producto", "enviar_precios", "crear_pedido"})
+
+
+def tool_names(agent: AgentConfig) -> set[str]:
+    """Names of the business tools the API sent with the agent."""
+    names = set()
+    for definition in agent.tools:
+        function = definition.get("function") if isinstance(definition, dict) else None
+        if isinstance(function, dict) and isinstance(function.get("name"), str):
+            names.add(function["name"])
+    return names
+
+
+def business_tools_section(agent: AgentConfig, *, test_mode: bool = False) -> str | None:
+    """How to use the business tools in a spoken call, then the API's own rules and data for them."""
+    names = tool_names(agent)
+    if not names:
+        return None
+
+    lines = [
+        "Herramientas del negocio (consultan y actúan en el sistema del negocio):",
+        "- Tienes todas estas herramientas, pero úsalas solo cuando sirvan a tu propósito y a las "
+        "instrucciones del negocio, o cuando la persona lo pida. Por ejemplo, un agente de atención "
+        "al cliente no ofrece pedidos ni ventas si no se los piden.",
+        "- Antes de consultar o hacer algo que la persona pidió, di una frase corta de espera, por "
+        "ejemplo \"déjame revisar\" o \"un momento, lo consulto\", y llama la herramienta en el "
+        "mismo turno. Las herramientas de leads se usan en silencio, sin anunciarlas.",
+        "- Nunca digas que hiciste algo hasta que la herramienta responda ok. Si responde con "
+        "un error, corrígelo y vuelve a intentarlo, o explícale a la persona con palabras sencillas.",
+        "- No leas ids, códigos ni formatos técnicos en voz alta.",
+    ]
+    if names & CALENDAR_TOOLS:
+        lines.append(
+            "- Puedes consultar la disponibilidad"
+            + (" y agendar, reprogramar o cancelar citas" if names & {"agendar_cita", "reprogramar_cita", "cancelar_cita"} else "")
+            + ". Ofrece pocas opciones de horario a la vez (dos o tres), no la lista completa."
+        )
+        lines.append(
+            "- Antes de agendar, reprogramar o cancelar, repítele a la persona el día de la semana, "
+            "la fecha y la hora (por ejemplo \"el jueves 15 de octubre a las nueve y media de la mañana\") "
+            "y espera que confirme."
+        )
+    if names & MESSAGING_TOOLS:
+        lines.append(
+            "- Los productos, precios y pedidos se envían al chat de WhatsApp de la persona: "
+            "díselo, por ejemplo \"te lo envío por WhatsApp\"."
+        )
+    if test_mode:
+        lines.append(
+            "- En esta llamada de prueba las acciones (citas, envíos, pedidos) se simulan; "
+            "responde como si fueran reales."
+        )
+
+    parts = ["\n".join(lines)]
+    if agent.tools_prompt and agent.tools_prompt.strip():
+        parts.append(agent.tools_prompt.strip())
+    return "\n\n".join(parts)
+
+
 def language_name(code: str | None) -> str:
     """Human name (in Spanish) for a language code like ``es`` or ``es-MX``."""
     base = (code or "es").split("-")[0].lower()
@@ -76,6 +139,10 @@ def build_system_prompt(agent: AgentConfig, *, test_mode: bool = False) -> str:
             "que en este momento no es posible y ofrece tu ayuda."
         )
     parts.append("\n".join(tool_lines))
+
+    business = business_tools_section(agent, test_mode=test_mode)
+    if business:
+        parts.append(business)
 
     if test_mode:
         parts.append(

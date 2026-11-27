@@ -9,7 +9,11 @@ from typing import Any
 import httpx
 from loguru import logger
 
+from rellachat.business_tools import error_result, valid_tools_path
 from rellachat.security import SECRET_HEADER
+
+# Seconds a business tool may take: the caller is waiting on the line
+TOOL_TIMEOUT = 10.0
 
 
 class RellachatApi:
@@ -64,3 +68,22 @@ class RellachatApi:
             "ended",
             {"transcript": transcript, "summary": summary, "duration": duration},
         )
+
+    async def run_tool(
+        self, tools_path: str | None, name: str, arguments: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        """Run one business tool through the API; any failure is an error result for the model."""
+        if not self._base_url or not valid_tools_path(tools_path):
+            return error_result()
+        url = f"{self._base_url}/voice-service/{tools_path}/{name}"
+        try:
+            async with httpx.AsyncClient(timeout=TOOL_TIMEOUT) as client:
+                response = await client.post(
+                    url,
+                    json={"arguments": arguments or {}},
+                    headers={SECRET_HEADER: self._secret, "Accept": "application/json"},
+                )
+            result = response.json() if response.status_code < 400 else None
+        except Exception:
+            return error_result()
+        return result if isinstance(result, dict) and "ok" in result else error_result()
