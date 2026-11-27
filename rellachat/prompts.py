@@ -36,6 +36,19 @@ CALENDAR_TOOLS = frozenset(
 
 MESSAGING_TOOLS = frozenset({"enviar_producto", "enviar_precios", "crear_pedido"})
 
+PRODUCT_SEARCH_TOOL = "buscar_productos"
+
+# Phone calls (Telnyx) have no chat behind them: nothing can be sent, everything is said
+PHONE_CALL_RULES = (
+    "Esta llamada es por teléfono: no puedes enviar mensajes, enlaces, fotos ni archivos. "
+    "Nunca ofrezcas enviar algo; da toda la información aquí mismo, en la llamada."
+)
+
+PHONE_PRODUCT_RULE = (
+    "- Si te preguntan por productos, búscalos con buscar_productos y di de inmediato, en voz "
+    "alta y en pocas palabras, el nombre, el precio y si está disponible."
+)
+
 
 def tool_names(agent: AgentConfig) -> set[str]:
     """Names of the business tools the API sent with the agent."""
@@ -76,7 +89,9 @@ def business_tools_section(agent: AgentConfig, *, test_mode: bool = False) -> st
             "la fecha y la hora (por ejemplo \"el jueves 15 de octubre a las nueve y media de la mañana\") "
             "y espera que confirme."
         )
-    if names & MESSAGING_TOOLS:
+    if agent.is_phone and PRODUCT_SEARCH_TOOL in names:
+        lines.append(PHONE_PRODUCT_RULE)
+    if names & MESSAGING_TOOLS and not agent.is_phone:
         lines.append(
             "- Los productos, precios y pedidos se envían al chat de WhatsApp de la persona: "
             "díselo, por ejemplo \"te lo envío por WhatsApp\"."
@@ -100,18 +115,29 @@ def language_name(code: str | None) -> str:
 
 
 def _outbound_lines(
-    identity: str, company: str, contact_name: str | None, initiated_by: str | None
+    identity: str,
+    company: str,
+    contact_name: str | None,
+    initiated_by: str | None,
+    *,
+    phone: bool = False,
 ) -> list[str]:
     """Who the agent is calling and how it opens a call the business placed."""
+    channel = "por teléfono" if phone else "por WhatsApp"
+    not_now = (
+        "Si no es buen momento para el cliente, ofrece llamar en otro momento y despídete."
+        if phone
+        else "Si no es buen momento para el cliente, ofrece llamar en otro momento o escribirle por "
+        "WhatsApp y despídete."
+    )
     lines = [
-        f"Eres {identity}, el agente de voz de {company}. Estás llamando por WhatsApp a un "
+        f"Eres {identity}, el agente de voz de {company}. Estás llamando {channel} a un "
         "cliente en nombre de la empresa: tú iniciaste la llamada, el cliente no te llamó.",
         f"Cuando el cliente conteste, saluda, preséntate como {identity} de {company} y di en una "
         "o dos frases el motivo de la llamada según tu propósito, las instrucciones del negocio y "
         "lo que sabes del cliente. Luego espera su respuesta. No preguntes en qué le puedes ayudar "
         "como si él te hubiera llamado.",
-        "Si no es buen momento para el cliente, ofrece llamar en otro momento o escribirle por "
-        "WhatsApp y despídete.",
+        not_now,
     ]
     if contact_name and contact_name.strip():
         lines.append(f"La persona a la que llamas se llama {contact_name.strip()}.")
@@ -154,7 +180,9 @@ def build_system_prompt(
     purpose = PURPOSE_LABELS.get(agent.purpose, PURPOSE_LABELS["other"])
 
     if agent.is_outbound:
-        parts: list[str] = _outbound_lines(identity, company, contact_name, initiated_by)
+        parts: list[str] = _outbound_lines(
+            identity, company, contact_name, initiated_by, phone=agent.is_phone
+        )
         goal = _call_goal_section(agent.call_instructions, company, initiated_by)
         if goal:
             parts.append(goal)
@@ -163,8 +191,9 @@ def build_system_prompt(
             f"Habla siempre en {language_name(agent.language)}, salvo que el cliente use otro idioma."
         )
     else:
+        channel = "Atiendes llamadas telefónicas." if agent.is_phone else "Atiendes llamadas telefónicas por WhatsApp."
         parts = [
-            f"Eres {identity}, el agente de voz de {company}. Atiendes llamadas telefónicas por WhatsApp.",
+            f"Eres {identity}, el agente de voz de {company}. {channel}",
             f"Tu propósito principal es {purpose}.",
             f"Habla siempre en {language_name(agent.language)}, salvo que quien llama use otro idioma.",
         ]
@@ -181,6 +210,8 @@ def build_system_prompt(
         parts.append("Instrucciones del negocio:\n" + agent.instructions.strip())
 
     parts.append(VOICE_STYLE_RULES)
+    if agent.is_phone:
+        parts.append(PHONE_CALL_RULES)
 
     tool_lines = [
         "Herramientas:",
@@ -257,6 +288,9 @@ OUTBOUND_CALL_STARTED_MARKER = (
 
 # ``ended`` summary of an outbound call nobody answered (the API marks it failed, nothing charged)
 UNANSWERED_SUMMARY = "El cliente no contestó la llamada."
+
+# ``ended`` summary of a phone call whose media stream never reached the agent
+PHONE_NOT_CONNECTED_SUMMARY = "La IA no pudo contestar la llamada."
 
 
 def call_started_marker(agent: AgentConfig) -> str:

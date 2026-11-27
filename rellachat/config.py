@@ -78,6 +78,10 @@ class Settings:
     voice_service_secret: str = ""
     port: int = DEFAULT_PORT
     ice_servers: list[IceServer] = field(default_factory=lambda: list(DEFAULT_ICE_SERVERS))
+    # Telnyx phone calls: the API key lets the serializer hang up calls the agent ends, and the
+    # public ``wss://`` base is where Telnyx streams media (the service must be reachable there)
+    telnyx_api_key: str = ""
+    public_ws_base_url: str = ""
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -97,4 +101,6 @@ class Settings:
             voice_service_secret=os.getenv("VOICE_SERVICE_SECRET", ""),
             port=port,
             ice_servers=parse_ice_servers(os.getenv("ICE_SERVERS")),
+            telnyx_api_key=os.getenv("TELNYX_API_KEY", ""),
+            public_ws_base_url=(os.getenv("PUBLIC_WS_BASE_URL") or "").strip().rstrip("/"),
         )

@@ -142,7 +142,10 @@ def now_iso() -> str:
 
 
 class VoiceCall:
-    """A single AI-handled call (WhatsApp or browser test)."""
+    """A single AI-handled call (WhatsApp or browser test; phone calls subclass it).
+
+    Subclasses change the media leg through ``_create_transport`` and ``_disconnect_media``.
+    """
 
     def __init__(
         self,
@@ -150,7 +153,7 @@ class VoiceCall:
         settings: Settings,
         api: RellachatApi,
         agent: AgentConfig,
-        connection: SmallWebRTCConnection,
+        connection: SmallWebRTCConnection | None,
         call_uuid: str | None = None,
         whatsapp: WhatsAppLeg | None = None,
         contact_name: str | None = None,
@@ -289,8 +292,9 @@ class VoiceCall:
         finally:
             await self.finalize()
 
-    async def _run_pipeline(self) -> None:
-        transport = SmallWebRTCTransport(
+    def _create_transport(self):
+        """The caller's media transport (WebRTC here; phone calls use Telnyx's WebSocket)."""
+        return SmallWebRTCTransport(
             webrtc_connection=self.connection,
             params=TransportParams(
                 audio_in_enabled=True,
@@ -298,6 +302,18 @@ class VoiceCall:
                 audio_in_filter=caller_audio_filter(),
             ),
         )
+
+    async def _disconnect_media(self) -> None:
+        """Close the caller's media leg once the call is over."""
+        if self.connection is None:
+            return
+        try:
+            await self.connection.disconnect()
+        except Exception as e:
+            logger.debug(f"Call {self.label}: disconnect failed: {e}")
+
+    async def _run_pipeline(self) -> None:
+        transport = self._create_transport()
         stt, tts, llm = self._build_services()
 
         llm.register_function("end_call", self._handle_end_call, cancel_on_interruption=False)
@@ -377,7 +393,7 @@ class VoiceCall:
             self._add_transcript("assistant", message.content, message.timestamp)
 
         if not self.outbound:
-            # Inbound: Meta's accept already happened, so the call is answered now
+            # Inbound: Meta's accept (or Telnyx's answer) already happened, so it is answered now
             self._mark_answered()
 
         if self._stop_requested:
@@ -616,10 +632,7 @@ class VoiceCall:
                 )
             except Exception as e:
                 logger.warning(f"Call {self.label}: Meta terminate failed: {e}")
-        try:
-            await self.connection.disconnect()
-        except Exception as e:
-            logger.debug(f"Call {self.label}: disconnect failed: {e}")
+        await self._disconnect_media()
 
         if not self.call_uuid or self._cancelled:
             return

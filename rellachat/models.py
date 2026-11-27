@@ -1,6 +1,6 @@
 """Request/response models for the voice service HTTP contract."""
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -35,10 +35,16 @@ class AgentConfig(BaseModel):
     direction: str = "inbound"
     # Outbound only: what the advisor who placed the call wants from it (API caps it at 2000 chars)
     call_instructions: str | None = None
+    # ``phone`` for Telnyx calls (real numbers); WhatsApp keeps the original behavior
+    transport: str = "whatsapp"
 
     @property
     def is_outbound(self) -> bool:
         return self.direction == "outbound"
+
+    @property
+    def is_phone(self) -> bool:
+        return self.transport == "phone"
 
     @property
     def ring_seconds(self) -> int:
@@ -143,3 +149,22 @@ class TestOfferRequest(BaseModel):
     agent: AgentConfig
     sdp: str
     type: str = "offer"
+
+
+class TelnyxCallInfo(BaseModel):
+    """Telnyx identifiers known when the call is prepared (none yet for outbound calls)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    call_control_id: str | None = None
+
+
+class PhonePrepareRequest(BaseModel):
+    """Body of ``POST /phone/calls/prepare``: a Telnyx call about to stream to ``/phone/ws``."""
+
+    call_uuid: str = Field(min_length=1)
+    direction: Literal["inbound", "outbound"]
+    telnyx: TelnyxCallInfo = Field(default_factory=TelnyxCallInfo)
+    agent: AgentConfig
+    contact: Contact = Field(default_factory=Contact)
+    initiated_by: Initiator | None = None

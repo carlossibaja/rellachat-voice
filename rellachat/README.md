@@ -37,6 +37,8 @@ pytest rellachat/tests              # unit tests, no network or provider calls
 | `VOICE_SERVICE_SECRET` | — | Shared secret, sent and checked in `X-Voice-Secret`. If it is unset, every protected endpoint returns 401 |
 | `PORT` / `HOST` | `7860` / `0.0.0.0` | HTTP bind address |
 | `ICE_SERVERS` | Google STUN | A JSON list of URL strings or `{urls, username, credential}` objects. Invalid input falls back to STUN |
+| `TELNYX_API_KEY` | — | Phone calls: lets Pipecat's `TelnyxFrameSerializer` hang up at Telnyx when the agent ends the call. Without it calls still work, but `end_call` cannot hang up |
+| `PUBLIC_WS_BASE_URL` | — | Phone calls: public `wss://` base of this service, for example `wss://voice.example.com`. Telnyx connects to `{base}/phone/ws` directly, so the service must be publicly reachable (tunnel in development). Unset: `/phone/calls/prepare` returns 503 |
 
 ## Endpoints
 
@@ -52,6 +54,10 @@ Every endpoint except `GET /health` requires the header `X-Voice-Secret`, compar
 | POST | `/calls/outbound/offer` | `{call_uuid, whatsapp:{token, phone_number_id}, agent (direction forced to "outbound", optional call_instructions), contact, initiated_by:{id, name}}` | 200 `{sdp, type: "offer"}`. 409 if `call_uuid` is already live. 500 if the offer could not be created |
 | POST | `/calls/{call_uuid}/answer` | `{sdp, type?: "answer", wa_call_id}` | 200 `{ok: true}`. 404 if no outbound call has that uuid. 409 if it was already answered. 422 if the SDP is invalid |
 | POST | `/calls/{call_uuid}/cancel` | — | 200 `{ok: true, found}`, idempotent: an unknown or finished call is `found: false`. 409 for an inbound call. Never posts `ended` |
+| POST | `/phone/calls/prepare` | `{call_uuid, direction: "inbound"\|"outbound", telnyx:{call_control_id?}, agent, contact, initiated_by?:{id, name}}` | 200 `{stream_url}`. 409 if `call_uuid` is pending or live. 503 without `PUBLIC_WS_BASE_URL` |
+| POST | `/phone/calls/{call_uuid}/cancel` | — | 200 `{ok: true, found}`, idempotent. Drops a pending or live phone call. 409 for a WhatsApp call. Never posts `ended` |
+| POST | `/phone/calls/{call_uuid}/hangup` | — | 200 `{ok: true, found}`. Telnyx hung up: a live call ends through the normal flow (`ended` with transcript, summary, usage) |
+| WS | `/phone/ws?call=<uuid>&token=<token>` | Telnyx media stream | No secret header: the one-time token from `prepare` authorizes it |
 
 ### How `/calls/connect` works
 
@@ -120,6 +126,17 @@ The business places the call; the API keeps all Meta signaling and the service o
 4. When the customer's media connects, the service posts `answered` (billing starts here) and the AI speaks first: the outbound prompt (`agent.direction == "outbound"`) tells it to introduce itself as `identity_name` from the company and say why it calls, from its purpose, instructions and what it knows of the customer. When the offer carries `agent.call_instructions` (optional, up to 2000 chars, written by the advisor in `initiated_by`), the prompt adds them as this call's goal: the AI introduces itself as usual and goes straight to that goal, in its own words, keeping its identity, company, language and rules. Empty or missing instructions leave the outbound prompt unchanged; inbound and test calls ignore the field.
 5. Nobody answers within 60 s (`ANSWER_TIMEOUT_SECS`): the call is torn down and `ended` is posted with `duration: 0`, no transcript and summary `"El cliente no contestó la llamada."`. Without a `wa_call_id` the service cannot terminate the ringing call at Meta; the API must do it when it gets that `ended`.
 6. Meta's `terminate` (customer hung up or rejected) arrives through the normal `/calls/terminate` forward and runs the normal end flow.
+
+## Phone calls (`/phone/*`, Telnyx)
+
+Real phone numbers through Telnyx Call Control with bidirectional media streaming. The API keeps all Telnyx signaling (`answer`, `dial`, webhooks); the service only handles the media stream.
+
+1. `POST /phone/calls/prepare` registers the call (`phone.py`, `PhoneCallRegistry`) and returns `stream_url = {PUBLIC_WS_BASE_URL}/phone/ws?call=<uuid>&token=<token>`. The token is random (`secrets.token_urlsafe(32)`), compared in constant time and usable once. A prepared call Telnyx never streams expires after 120 s (`PHONE_STREAM_TTL_SECS`).
+2. The API passes `stream_url` to Telnyx `answer` (inbound) or `dial` (outbound), asking for a bidirectional PCMU 8 kHz stream. Telnyx opens `/phone/ws`; a bad, unknown, expired or reused token closes it with 1008 before accepting.
+3. The service reads Telnyx's `connected` and `start` events (10 s limit). `start` gives `stream_id`, `start.call_control_id` and `start.media_format.encoding` (PCMU or PCMA), which build `TelnyxFrameSerializer` with `TELNYX_API_KEY` and `auto_hang_up`. A `call_control_id` that differs from the one sent to `prepare` is rejected. A stream that fails here posts `ended` with `duration: 0` and `"La IA no pudo contestar la llamada."`.
+4. `PhoneVoiceCall` (a `VoiceCall`) runs the same pipeline as WhatsApp calls over `FastAPIWebsocketTransport`: same STT/LLM/TTS, tools through the API, transcript, usage (STT meter included), summary, `answered` and `ended`. The socket lives as long as the `/phone/ws` handler, so the call runs inside it. Inbound calls greet as soon as the stream starts; outbound calls post `answered` and let the AI open then (Telnyx starts streaming once the callee answers).
+5. The agent is forced to `transport: "phone"`, the prepared `direction`, `transfer_enabled: false` (no advisors on the phone in Phase 1), and loses the messaging tools (`enviar_producto`, `enviar_precios`, `crear_pedido`). The phone prompt says nothing can be sent and, with `buscar_productos`, tells the AI to say a product's name, price and availability out loud right away. WhatsApp prompts are byte-identical to before (hash test).
+6. Ending: `end_call` or shutdown ends the pipeline and the serializer hangs up at Telnyx. Telnyx hanging up closes the socket, and the API also calls `/phone/calls/{uuid}/hangup`; both lead to the same single `ended`. A hang-up of a call that never streamed posts `ended` with `duration: 0` (`"El cliente no contestó la llamada."` for outbound). `/phone/calls/{uuid}/cancel` (Telnyx `dial` failed) drops the call without `ended`.
 
 ## Decisions and contract notes for the API and the web
 

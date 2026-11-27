@@ -1,4 +1,4 @@
-"""Rellachat voice service: FastAPI server answering WhatsApp calls with AI.
+"""Rellachat voice service: FastAPI server answering WhatsApp and phone (Telnyx) calls with AI.
 
 Run with ``python rellachat/server.py`` from the repository root.
 """
@@ -14,7 +14,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import aiohttp
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket
 from fastapi.responses import JSONResponse
 from loguru import logger
 from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
@@ -29,10 +29,22 @@ from rellachat.models import (
     OutboundAnswerRequest,
     OutboundOfferRequest,
     OutboundWhatsApp,
+    PhonePrepareRequest,
     TerminateRequest,
     TestOfferRequest,
 )
 from rellachat.outbound import OutboundWebRTCConnection
+from rellachat.phone import (
+    TELNYX_START_TIMEOUT_SECS,
+    DuplicateCallError,
+    PhoneCallRegistry,
+    PhoneVoiceCall,
+    build_serializer,
+    phone_agent,
+    read_telnyx_start,
+    stream_url,
+)
+from rellachat.prompts import PHONE_NOT_CONNECTED_SUMMARY, UNANSWERED_SUMMARY
 from rellachat.security import secret_matches
 from rellachat.whatsapp import (
     InvalidWebhookError,
@@ -44,6 +56,8 @@ from rellachat.whatsapp import (
 load_env()
 
 SHUTDOWN_GRACE_SECS = 10
+# WebSocket close code for a rejected Telnyx stream (policy violation)
+WS_POLICY_VIOLATION = 1008
 
 
 class ServiceState:
@@ -58,6 +72,9 @@ class ServiceState:
         # Meta credentials of outbound calls, used to terminate them once answered
         self.outbound: dict[str, OutboundWhatsApp] = {}  # call_uuid -> credentials
         self.test_calls: set[VoiceCall] = set()
+        # Phone (Telnyx) calls: prepared ones waiting for their stream, and the uuids of live ones
+        self.phone = PhoneCallRegistry()
+        self.phone_calls: set[str] = set()
         self.tasks: set[asyncio.Task] = set()
 
     def spawn(self, coro, name: str) -> asyncio.Task:
@@ -72,6 +89,7 @@ def create_app(
     *,
     call_factory=VoiceCall,
     outbound_connection_factory=OutboundWebRTCConnection,
+    phone_call_factory=PhoneVoiceCall,
 ) -> FastAPI:
     """Build the service; the factories are swappable so tests run without media or providers."""
     state = ServiceState(settings or Settings.from_env())
@@ -258,6 +276,99 @@ def create_app(
             await call.cancel()
         return {"ok": True, "found": call is not None}
 
+    # ---------------------------------------------------------------- phone
+
+    @app.post("/phone/calls/prepare", dependencies=[Depends(require_secret)])
+    async def phone_prepare(body: PhonePrepareRequest):
+        """Register a Telnyx call and return the one-time stream URL the API gives Telnyx."""
+        base_url = state.settings.public_ws_base_url
+        if not base_url:
+            raise HTTPException(status_code=503, detail="PUBLIC_WS_BASE_URL is not set")
+        if body.call_uuid in state.calls:
+            raise HTTPException(status_code=409, detail="Call already exists")
+        try:
+            token = state.phone.prepare(body)
+        except DuplicateCallError:
+            raise HTTPException(status_code=409, detail="Call already exists")
+        return {"stream_url": stream_url(base_url, body.call_uuid, token)}
+
+    @app.post("/phone/calls/{call_uuid}/cancel", dependencies=[Depends(require_secret)])
+    async def phone_cancel(call_uuid: str):
+        """The call never went through at Telnyx: drop it without ``ended`` (idempotent)."""
+        if call_uuid in state.calls and call_uuid not in state.phone_calls:
+            raise HTTPException(status_code=409, detail="Only phone calls can be cancelled here")
+        pending = state.phone.drop(call_uuid)
+        call = state.calls.pop(call_uuid, None)
+        state.phone_calls.discard(call_uuid)
+        if call:
+            await call.cancel()
+        return {"ok": True, "found": pending is not None or call is not None}
+
+    @app.post("/phone/calls/{call_uuid}/hangup", dependencies=[Depends(require_secret)])
+    async def phone_hangup(call_uuid: str):
+        """Telnyx hung up: finalize the call like a WhatsApp terminate (``ended`` comes from it)."""
+        call = state.calls.get(call_uuid) if call_uuid in state.phone_calls else None
+        if call:
+            call.mark_remote_terminated()
+            await call.hangup()
+            return {"ok": True, "found": True}
+        pending = state.phone.drop(call_uuid)
+        if pending:
+            # Never connected: nothing to summarize. Background: the API is waiting on this request.
+            summary = (
+                UNANSWERED_SUMMARY if pending.direction == "outbound" else PHONE_NOT_CONNECTED_SUMMARY
+            )
+            state.spawn(state.api.ended(call_uuid, [], summary, 0), f"phone-ended-{call_uuid}")
+        return {"ok": True, "found": pending is not None}
+
+    async def report_not_connected(call_uuid: str) -> None:
+        state.spawn(
+            state.api.ended(call_uuid, [], PHONE_NOT_CONNECTED_SUMMARY, 0),
+            f"phone-ended-{call_uuid}",
+        )
+
+    @app.websocket("/phone/ws")
+    async def phone_ws(websocket: WebSocket):
+        """Telnyx's bidirectional media stream for a prepared call (one-time token)."""
+        call_uuid = websocket.query_params.get("call")
+        prepared = state.phone.claim(call_uuid, websocket.query_params.get("token"))
+        if prepared is None:
+            logger.warning(f"Phone stream rejected: unknown call or bad token ({call_uuid})")
+            await websocket.close(code=WS_POLICY_VIOLATION)
+            return
+
+        await websocket.accept()
+        try:
+            start = await asyncio.wait_for(read_telnyx_start(websocket), TELNYX_START_TIMEOUT_SECS)
+            expected = prepared.telnyx.call_control_id
+            if expected and expected != start.call_control_id:
+                raise ValueError(f"stream is for Telnyx call {start.call_control_id}")
+        except Exception as e:
+            logger.error(f"Call {prepared.call_uuid}: invalid Telnyx stream: {e}")
+            await _close_quietly(websocket)
+            await report_not_connected(prepared.call_uuid)
+            return
+
+        call = phone_call_factory(
+            settings=state.settings,
+            api=state.api,
+            agent=phone_agent(prepared.agent, prepared.direction),
+            websocket=websocket,
+            serializer=build_serializer(start, state.settings.telnyx_api_key),
+            call_uuid=prepared.call_uuid,
+            contact_name=prepared.contact.name,
+            initiated_by=prepared.initiated_by.name if prepared.initiated_by else None,
+        )
+        state.calls[prepared.call_uuid] = call
+        state.phone_calls.add(prepared.call_uuid)
+        logger.info(f"Call {prepared.call_uuid}: Telnyx stream {start.stream_id} connected")
+        try:
+            # The socket lives as long as this handler: run the call here, not in the background
+            await run_call(call)
+        finally:
+            state.phone_calls.discard(prepared.call_uuid)
+            await _close_quietly(websocket)
+
     # ---------------------------------------------------------- browser test
 
     @app.post("/test/offer", dependencies=[Depends(require_secret)])
@@ -291,6 +402,13 @@ def create_app(
         return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
 
     return app
+
+
+async def _close_quietly(websocket: WebSocket) -> None:
+    try:
+        await websocket.close()
+    except Exception as e:
+        logger.debug(f"WebSocket close failed: {e}")
 
 
 async def _disconnect_quietly(connection) -> None:
