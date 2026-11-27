@@ -328,7 +328,7 @@ class VoiceCall:
         async def on_client_connected(_transport, _client):
             logger.info(f"Call {self.label}: caller media connected")
             assert self._worker is not None
-            await self._worker.queue_frames([TTSSpeakFrame(build_greeting(self.agent))])
+            await self._worker.queue_frames([TTSSpeakFrame(build_greeting(self.agent, self.contact_name))])
 
         @transport.event_handler("on_client_disconnected")
         async def on_client_disconnected(_transport, _client):

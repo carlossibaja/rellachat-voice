@@ -1,5 +1,7 @@
 """Prompt builders for the voice agent (system prompt, greeting, summaries)."""
 
+import re
+
 from rellachat.models import AgentConfig
 
 PURPOSE_LABELS = {
@@ -153,10 +155,22 @@ def build_system_prompt(agent: AgentConfig, *, test_mode: bool = False) -> str:
     return "\n\n".join(parts)
 
 
-def build_greeting(agent: AgentConfig) -> str:
-    """Opening line: the configured greeting or a default from identity/company."""
+# {{cliente}} / {{nombre}} in a configured greeting: the caller's first name
+_CLIENT_PLACEHOLDER = re.compile(r"\{\{\s*(cliente|nombre)\s*\}\}", re.IGNORECASE)
+
+
+def _fill_client(greeting: str, contact_name: str | None) -> str:
+    first_name = (contact_name or "").strip().split(" ")[0]
+    if first_name:
+        return _CLIENT_PLACEHOLDER.sub(first_name, greeting)
+    # Unknown caller: drop the placeholder and the space before it ("hola {{cliente}}," -> "hola,")
+    return re.sub(r"\s*" + _CLIENT_PLACEHOLDER.pattern, "", greeting, flags=re.IGNORECASE)
+
+
+def build_greeting(agent: AgentConfig, contact_name: str | None = None) -> str:
+    """Opening line: the configured greeting (with {{cliente}} filled) or a default from identity/company."""
     if agent.greeting and agent.greeting.strip():
-        return agent.greeting.strip()
+        return _fill_client(agent.greeting.strip(), contact_name)
     identity = agent.identity_name.strip() or agent.name.strip()
     company = agent.company_name.strip()
     if identity and company:
