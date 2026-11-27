@@ -1,6 +1,7 @@
 """Outbound (business-initiated) AI calls: offer, answer, cancel, opener and teardown."""
 
 import asyncio
+import hashlib
 
 import pytest
 from fastapi.testclient import TestClient
@@ -9,7 +10,7 @@ from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
 
 from rellachat.bot import VoiceCall, WhatsAppLeg
 from rellachat.config import Settings
-from rellachat.models import AgentConfig
+from rellachat.models import AgentConfig, OutboundOfferRequest
 from rellachat.outbound import (
     ANSWER_TIMEOUT_SECS,
     OutboundWebRTCConnection,
@@ -102,6 +103,57 @@ def test_outbound_prompt_tells_the_agent_it_is_calling_and_how_to_open():
     assert "Carlos" in prompt
     assert "Confirma la cita de mañana." in prompt
     assert "Atiendes llamadas" not in prompt
+
+
+# sha256 of the outbound prompt below before call instructions existed (T9b)
+OUTBOUND_PROMPT_SHA256 = "8ebd05c9b158a9d0f2a714a87a00620e4b298d0054bd16189df165e05c9150f5"
+
+
+def test_agent_config_accepts_optional_call_instructions():
+    assert agent().call_instructions is None
+    assert agent(call_instructions="Ofrécele la promo.").call_instructions == "Ofrécele la promo."
+    body = offer_body()
+    body["agent"]["call_instructions"] = "Ofrécele la promo."
+    assert OutboundOfferRequest(**body).agent.call_instructions == "Ofrécele la promo."
+
+
+def test_outbound_prompt_takes_the_advisors_instructions_as_the_call_goal():
+    instructions = "Recuérdale que su pedido 1234 está listo para recoger hoy."
+    prompt = build_system_prompt(
+        agent(direction="outbound", call_instructions=f"  {instructions}  "),
+        contact_name="Ana Pérez",
+        initiated_by="Carlos",
+    )
+    assert "Objetivo de esta llamada" in prompt
+    assert instructions in prompt
+    assert "pidió Carlos" in prompt
+    assert "no la leas" in prompt
+    # Identity, company and the agent's own rules stay in place
+    assert "Sofía" in prompt and "Rella" in prompt
+    assert "Confirma la cita de mañana." in prompt
+    assert "una sola pregunta a la vez" in prompt
+
+
+def test_outbound_goal_without_advisor_name_still_reads_naturally():
+    prompt = build_system_prompt(agent(direction="outbound", call_instructions="Ofrece la promo."))
+    assert "Objetivo de esta llamada" in prompt
+    assert "un asesor del equipo de Rella" in prompt
+
+
+@pytest.mark.parametrize("value", [None, "", "   \n "])
+def test_outbound_prompt_without_call_instructions_is_unchanged(value):
+    prompt = build_system_prompt(
+        agent(direction="outbound", call_instructions=value),
+        contact_name="Ana Pérez",
+        initiated_by="Carlos",
+    )
+    assert hashlib.sha256(prompt.encode()).hexdigest() == OUTBOUND_PROMPT_SHA256
+
+
+def test_inbound_prompt_ignores_call_instructions():
+    assert build_system_prompt(agent(call_instructions="Ofrece la promo.")) == build_system_prompt(
+        agent()
+    )
 
 
 def test_inbound_prompt_is_unchanged_by_the_outbound_variant():

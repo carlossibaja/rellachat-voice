@@ -120,6 +120,23 @@ def _outbound_lines(
     return lines
 
 
+def _call_goal_section(
+    call_instructions: str | None, company: str, initiated_by: str | None
+) -> str | None:
+    """The advisor's request for this outbound call, framed as its goal (None when empty)."""
+    goal = (call_instructions or "").strip()
+    if not goal:
+        return None
+    advisor = (initiated_by or "").strip() or f"un asesor del equipo de {company}"
+    return (
+        f"Objetivo de esta llamada (te lo pidió {advisor}):\n{goal}\n"
+        "Cuando el cliente conteste, preséntate como siempre y ve directo a este objetivo: es "
+        "el motivo de la llamada. Es una solicitud del asesor para ti, no un texto para leer: "
+        "no la leas en voz alta palabra por palabra, dilo con tus propias palabras. Mantén tu "
+        "identidad, tu empresa, tu idioma y todas tus reglas."
+    )
+
+
 def build_system_prompt(
     agent: AgentConfig,
     *,
@@ -138,6 +155,9 @@ def build_system_prompt(
 
     if agent.is_outbound:
         parts: list[str] = _outbound_lines(identity, company, contact_name, initiated_by)
+        goal = _call_goal_section(agent.call_instructions, company, initiated_by)
+        if goal:
+            parts.append(goal)
         parts.append(f"Tu propósito principal es {purpose}.")
         parts.append(
             f"Habla siempre en {language_name(agent.language)}, salvo que el cliente use otro idioma."

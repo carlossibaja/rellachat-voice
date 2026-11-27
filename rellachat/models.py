@@ -33,6 +33,8 @@ class AgentConfig(BaseModel):
     tools_path: str | None = None
     # ``outbound`` when the business places the call (T9); inbound keeps the original behavior
     direction: str = "inbound"
+    # Outbound only: what the advisor who placed the call wants from it (API caps it at 2000 chars)
+    call_instructions: str | None = None
 
     @property
     def is_outbound(self) -> bool:
