@@ -74,8 +74,9 @@ from rellachat.usage import CallUsage, SttAudioMeter, UsageObserver
 AUDIO_IN_SAMPLE_RATE = 16000
 AUDIO_OUT_SAMPLE_RATE = 24000
 LLM_MAX_TOKENS = 400
-# Words the caller must say before the agent stops talking (one word is enough while it is quiet)
-INTERRUPT_MIN_WORDS = 3
+# Words the caller must say before the agent stops talking: one, so a "sí" or "espera" cuts it off
+# (interim transcripts count, so it stops as soon as the first word is recognized)
+INTERRUPT_MIN_WORDS = 1
 # Unrecognized turns in a row the agent still answers (asks to repeat) before staying quiet
 EMPTY_TURN_RECOVERIES = 3
 
