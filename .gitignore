@@ -82,3 +82,7 @@ whisker_setup.py
 evals/release/test-runs/
 evals/turn-completion/test-runs/
 evals/llm-with-backend/test-runs/
+
+# Rellachat voice service: keep secrets out, keep the template
+rellachat/.env
+!rellachat/.env.example

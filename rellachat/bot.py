@@ -1,0 +1,471 @@
+"""One AI voice call: SmallWebRTC -> Cartesia STT -> Claude -> Cartesia TTS.
+
+``VoiceCall`` owns the pipeline for a single call, its transcript, the
+``transfer_to_advisor`` / ``end_call`` tools, the transfer state machine and
+the callbacks to the Rellachat API.
+
+Transfer states::
+
+    AI --transfer_to_advisor--> TRANSFER_PENDING --advisor-offer--> BRIDGED
+                                      |
+                                      +--ring timeout / API failure--> AI
+"""
+
+import asyncio
+import time
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from enum import StrEnum
+from typing import Any
+
+from loguru import logger
+from pipecat.adapters.llm.schemas.function_schema import FunctionSchema
+from pipecat.adapters.llm.schemas.tools_schema import ToolsSchema
+from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.frames.frames import (
+    EndWorkerFrame,
+    FunctionCallResultProperties,
+    LLMMessagesAppendFrame,
+    TTSSpeakFrame,
+)
+from pipecat.pipeline.pipeline import Pipeline
+from pipecat.pipeline.worker import PipelineParams, PipelineWorker
+from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.processors.aggregators.llm_response_universal import (
+    LLMContextAggregatorPair,
+    LLMUserAggregatorParams,
+)
+from pipecat.services.anthropic.llm import AnthropicLLMService
+from pipecat.services.cartesia.stt import CartesiaSTTService
+from pipecat.services.cartesia.tts import CartesiaTTSService
+from pipecat.services.llm_service import FunctionCallParams
+from pipecat.transcriptions.language import Language
+from pipecat.transports.base_transport import TransportParams
+from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
+from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
+from pipecat.workers.runner import WorkerRunner
+
+from rellachat.api_client import RellachatApi
+from rellachat.bridge import AdvisorLeg, AudioInjector, CallerAudioGate, CallerMode
+from rellachat.config import Settings
+from rellachat.models import AdvisorUser, AgentConfig
+from rellachat.prompts import (
+    CALL_STARTED_MARKER,
+    HOLD_MESSAGE,
+    NO_ADVISOR_INSTRUCTION,
+    build_greeting,
+    build_system_prompt,
+)
+from rellachat.summarizer import summarize_call, summarize_for_transfer
+
+AUDIO_IN_SAMPLE_RATE = 16000
+AUDIO_OUT_SAMPLE_RATE = 24000
+LLM_MAX_TOKENS = 400
+
+
+class CallState(StrEnum):
+    AI = "ai"
+    TRANSFER_PENDING = "transfer_pending"
+    BRIDGED = "bridged"
+    ENDED = "ended"
+
+
+class TransferNotPendingError(Exception):
+    """Raised when an advisor offer arrives but no transfer is ringing."""
+
+
+@dataclass
+class WhatsAppLeg:
+    """What we need to hang up the WhatsApp side from our end."""
+
+    client: Any  # pipecat WhatsAppClient
+    call_id: str
+
+
+def to_language(code: str | None) -> Language:
+    """Map an agent language code (``es``, ``es-MX``) to a pipecat Language."""
+    value = (code or "es").strip()
+    for candidate in (value, value.split("-")[0].lower()):
+        try:
+            return Language(candidate)
+        except ValueError:
+            continue
+    return Language.ES
+
+
+def now_iso() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+class VoiceCall:
+    """A single AI-handled call (WhatsApp or browser test)."""
+
+    def __init__(
+        self,
+        *,
+        settings: Settings,
+        api: RellachatApi,
+        agent: AgentConfig,
+        connection: SmallWebRTCConnection,
+        call_uuid: str | None = None,
+        whatsapp: WhatsAppLeg | None = None,
+        contact_name: str | None = None,
+    ):
+        self.settings = settings
+        self.api = api
+        self.agent = agent
+        self.connection = connection
+        self.call_uuid = call_uuid
+        self.whatsapp = whatsapp
+        self.contact_name = contact_name
+        self.test_mode = call_uuid is None
+
+        self.label = call_uuid or f"test-{connection.pc_id}"
+        self.state = CallState.AI
+        self.transcript: list[dict] = []
+        self.answered_at: float | None = None
+
+        self._gate = CallerAudioGate(name=f"caller-gate-{self.label}")
+        self._caller_injector = AudioInjector(
+            drop_tts_when_bridged=True, name=f"caller-injector-{self.label}"
+        )
+        self._advisor: AdvisorLeg | None = None
+        self._transfer_timer: asyncio.Task | None = None
+        self._background: set[asyncio.Task] = set()
+        self._runner: WorkerRunner | None = None
+        self._worker: PipelineWorker | None = None
+        self._remote_terminated = False
+        self._finalized = False
+        self._stop_requested = False
+
+    # ------------------------------------------------------------------ utils
+
+    def _spawn(self, coro, name: str) -> None:
+        task = asyncio.create_task(coro, name=f"{name}-{self.label}")
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
+    def _add_transcript(self, role: str, text: str | None, at: str | None = None) -> None:
+        text = (text or "").strip()
+        if text:
+            self.transcript.append({"role": role, "text": text, "at": at or now_iso()})
+
+    # --------------------------------------------------------------- pipeline
+
+    def _build_services(self):
+        language = to_language(self.agent.language)
+        stt = CartesiaSTTService(
+            api_key=self.settings.cartesia_api_key,
+            settings=CartesiaSTTService.Settings(language=language),
+        )
+        tts = CartesiaTTSService(
+            api_key=self.settings.cartesia_api_key,
+            settings=CartesiaTTSService.Settings(
+                voice=self.agent.voice_id or self.settings.cartesia_voice_id,
+                language=language,
+            ),
+        )
+        llm = AnthropicLLMService(
+            api_key=self.settings.anthropic_api_key,
+            settings=AnthropicLLMService.Settings(
+                model=self.settings.anthropic_model,
+                system_instruction=build_system_prompt(self.agent, test_mode=self.test_mode),
+                max_tokens=LLM_MAX_TOKENS,
+            ),
+        )
+        return stt, tts, llm
+
+    def _tools(self) -> ToolsSchema:
+        tools = [
+            FunctionSchema(
+                name="end_call",
+                description=(
+                    "End the phone call. Use it when the conversation is over or the caller "
+                    "says goodbye. Say a short farewell in the same turn before calling it."
+                ),
+                properties={},
+                required=[],
+            )
+        ]
+        if self.agent.transfer_enabled:
+            tools.append(
+                FunctionSchema(
+                    name="transfer_to_advisor",
+                    description=(
+                        "Transfer the caller to a human advisor. Use it when the caller asks "
+                        "for a person or you cannot solve the request. Do not say anything "
+                        "before calling it; the system asks the caller to hold."
+                    ),
+                    properties={
+                        "reason": {
+                            "type": "string",
+                            "description": "Short reason for the transfer, in Spanish.",
+                        }
+                    },
+                    required=["reason"],
+                )
+            )
+        return ToolsSchema(standard_tools=tools)
+
+    async def run(self) -> None:
+        """Run the call until either side hangs up, then report it."""
+        try:
+            await self._run_pipeline()
+        except Exception as e:
+            logger.exception(f"Call {self.label} pipeline failed: {e}")
+        finally:
+            await self.finalize()
+
+    async def _run_pipeline(self) -> None:
+        transport = SmallWebRTCTransport(
+            webrtc_connection=self.connection,
+            params=TransportParams(audio_in_enabled=True, audio_out_enabled=True),
+        )
+        stt, tts, llm = self._build_services()
+
+        llm.register_function("end_call", self._handle_end_call, cancel_on_interruption=False)
+        if self.agent.transfer_enabled:
+            llm.register_function(
+                "transfer_to_advisor", self._handle_transfer, cancel_on_interruption=False
+            )
+
+        context = LLMContext(
+            messages=[{"role": "user", "content": CALL_STARTED_MARKER}],
+            tools=self._tools(),
+        )
+        user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
+            context,
+            user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
+        )
+
+        pipeline = Pipeline(
+            [
+                transport.input(),
+                self._gate,
+                stt,
+                user_aggregator,
+                llm,
+                tts,
+                self._caller_injector,
+                transport.output(),
+                assistant_aggregator,
+            ]
+        )
+        self._worker = PipelineWorker(
+            pipeline,
+            params=PipelineParams(
+                audio_in_sample_rate=AUDIO_IN_SAMPLE_RATE,
+                audio_out_sample_rate=AUDIO_OUT_SAMPLE_RATE,
+                enable_metrics=True,
+            ),
+            # Bridged calls carry no STT/TTS activity; hang-ups end the call instead.
+            idle_timeout_secs=None,
+        )
+        self._runner = WorkerRunner(handle_sigint=False)
+        await self._runner.add_workers(self._worker)
+
+        @transport.event_handler("on_client_connected")
+        async def on_client_connected(_transport, _client):
+            logger.info(f"Call {self.label}: caller media connected")
+            assert self._worker is not None
+            await self._worker.queue_frames([TTSSpeakFrame(build_greeting(self.agent))])
+
+        @transport.event_handler("on_client_disconnected")
+        async def on_client_disconnected(_transport, _client):
+            logger.info(f"Call {self.label}: caller disconnected")
+            await self._cancel_runner()
+
+        @user_aggregator.event_handler("on_user_turn_stopped")
+        async def on_user_turn_stopped(_aggregator, _strategy, message):
+            self._add_transcript("user", message.content, message.timestamp)
+
+        @assistant_aggregator.event_handler("on_assistant_turn_stopped")
+        async def on_assistant_turn_stopped(_aggregator, message):
+            self._add_transcript("assistant", message.content, message.timestamp)
+
+        self.answered_at = time.monotonic()
+        if self.call_uuid:
+            self._spawn(self.api.answered(self.call_uuid), "answered")
+
+        if self._stop_requested:
+            return
+        await self._runner.run()
+
+    async def _cancel_runner(self) -> None:
+        self._stop_requested = True
+        if self._runner:
+            try:
+                await self._runner.cancel()
+            except Exception as e:
+                logger.debug(f"Call {self.label}: runner cancel failed: {e}")
+
+    # ------------------------------------------------------------------ tools
+
+    async def _handle_end_call(self, params: FunctionCallParams) -> None:
+        logger.info(f"Call {self.label}: end_call requested by the AI")
+        await params.result_callback(
+            {"status": "ending"}, properties=FunctionCallResultProperties(run_llm=False)
+        )
+        # Pushed after the farewell text, so the TTS audio is flushed before ending.
+        await params.llm.push_frame(EndWorkerFrame(reason="end_call"))
+
+    async def _handle_transfer(self, params: FunctionCallParams) -> None:
+        reason = str((params.arguments or {}).get("reason") or "").strip()
+
+        if self.test_mode:
+            await params.result_callback(
+                {
+                    "status": "simulated",
+                    "message": "Llamada de prueba: no hay transferencia real. Di que en una "
+                    "llamada real transferirías ahora a un asesor y sigue ayudando.",
+                }
+            )
+            return
+
+        if self.state != CallState.AI:
+            await params.result_callback(
+                {"status": "already_in_progress"},
+                properties=FunctionCallResultProperties(run_llm=False),
+            )
+            return
+
+        logger.info(f"Call {self.label}: transfer requested ({reason})")
+        self.state = CallState.TRANSFER_PENDING
+        self._gate.mode = CallerMode.HOLD
+        await params.result_callback(
+            {"status": "transfer_started"},
+            properties=FunctionCallResultProperties(run_llm=False),
+        )
+        await params.llm.push_frame(TTSSpeakFrame(HOLD_MESSAGE))
+        self._spawn(self._request_transfer(reason), "transfer")
+
+    # --------------------------------------------------------------- transfer
+
+    async def _request_transfer(self, reason: str) -> None:
+        history = list(self.transcript)
+        if reason:
+            history.append({"role": "assistant", "text": f"Motivo de la transferencia: {reason}"})
+        summary = await summarize_for_transfer(
+            self.settings.anthropic_api_key, self.settings.anthropic_model, history
+        )
+        if self.state != CallState.TRANSFER_PENDING:
+            return
+        assert self.call_uuid is not None
+        ok = await self.api.transfer(self.call_uuid, summary)
+        if self.state != CallState.TRANSFER_PENDING:
+            return
+        if not ok:
+            logger.warning(f"Call {self.label}: API rejected the transfer; AI resumes")
+            await self._resume_ai(notify_api=False)
+            return
+        self._transfer_timer = asyncio.create_task(
+            self._transfer_timeout(self.agent.ring_seconds), name=f"transfer-timer-{self.label}"
+        )
+
+    async def _transfer_timeout(self, seconds: int) -> None:
+        await asyncio.sleep(seconds)
+        if self.state == CallState.TRANSFER_PENDING:
+            logger.info(f"Call {self.label}: no advisor answered in {seconds}s")
+            await self._resume_ai(notify_api=True)
+
+    async def _resume_ai(self, *, notify_api: bool) -> None:
+        self.state = CallState.AI
+        self._gate.mode = CallerMode.AI
+        if notify_api and self.call_uuid:
+            self._spawn(self.api.transfer_cancelled(self.call_uuid), "transfer-cancelled")
+        if self._worker:
+            await self._worker.queue_frames(
+                [
+                    LLMMessagesAppendFrame(
+                        messages=[{"role": "developer", "content": NO_ADVISOR_INSTRUCTION}],
+                        run_llm=True,
+                    )
+                ]
+            )
+
+    async def accept_advisor(self, sdp: str, sdp_type: str, user: AdvisorUser) -> dict:
+        """Bridge an advisor's browser into the call. Returns the SDP answer."""
+        if self.state != CallState.TRANSFER_PENDING:
+            raise TransferNotPendingError()
+
+        # Claim synchronously so the ring timer cannot fire in between.
+        self.state = CallState.BRIDGED
+        if self._transfer_timer:
+            self._transfer_timer.cancel()
+            self._transfer_timer = None
+        self._gate.mode = CallerMode.BRIDGED
+
+        advisor = AdvisorLeg(
+            call_label=self.label,
+            ice_servers=self.settings.ice_servers,
+            to_caller=self._caller_injector.inject,
+            on_closed=self._on_advisor_closed,
+        )
+        try:
+            answer = await advisor.start(sdp, sdp_type)
+        except Exception:
+            logger.exception(f"Call {self.label}: advisor connection failed; AI resumes")
+            await advisor.stop()
+            await self._resume_ai(notify_api=True)
+            raise
+
+        self._advisor = advisor
+        self._gate.sink = advisor.injector.inject
+        self._caller_injector.bridged = True
+        advisor_name = (user.name or "").strip() or "un asesor"
+        self._add_transcript("advisor", f"[Llamada transferida a {advisor_name}]")
+        logger.info(f"Call {self.label}: bridged with advisor {user.id}")
+        assert self.call_uuid is not None
+        # Background: the API is waiting on this request and may be single-threaded.
+        self._spawn(self.api.transferred(self.call_uuid, user.id), "transferred")
+        return answer
+
+    async def _on_advisor_closed(self) -> None:
+        if self.state != CallState.BRIDGED:
+            return
+        logger.info(f"Call {self.label}: advisor hung up; ending the call")
+        self._add_transcript("advisor", "[El asesor colgó]")
+        await self._cancel_runner()
+
+    # ------------------------------------------------------------------- end
+
+    def mark_remote_terminated(self) -> None:
+        """Meta already ended the WhatsApp call; do not ask it to terminate again."""
+        self._remote_terminated = True
+
+    async def hangup(self) -> None:
+        """Stop the call from our side (e.g. server shutdown)."""
+        await self._cancel_runner()
+
+    async def finalize(self) -> None:
+        """Tear down both legs and report the call to the API (exactly once)."""
+        if self._finalized:
+            return
+        self._finalized = True
+        self.state = CallState.ENDED
+
+        if self._transfer_timer:
+            self._transfer_timer.cancel()
+        if self._advisor:
+            await self._advisor.stop()
+
+        if self.whatsapp and not self._remote_terminated:
+            try:
+                await self.whatsapp.client._whatsapp_api.terminate_call_to_whatsapp(
+                    self.whatsapp.call_id
+                )
+            except Exception as e:
+                logger.warning(f"Call {self.label}: Meta terminate failed: {e}")
+        try:
+            await self.connection.disconnect()
+        except Exception as e:
+            logger.debug(f"Call {self.label}: disconnect failed: {e}")
+
+        if not self.call_uuid:
+            return
+        duration = int(time.monotonic() - self.answered_at) if self.answered_at else 0
+        summary = await summarize_call(
+            self.settings.anthropic_api_key, self.settings.anthropic_model, self.transcript
+        )
+        await self.api.ended(self.call_uuid, self.transcript, summary, duration)
+        logger.info(f"Call {self.label}: ended after {duration}s")

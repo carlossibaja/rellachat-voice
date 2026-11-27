@@ -1,0 +1,5 @@
+extend = "../pyproject.toml"
+
+[lint]
+# Service code: docstrings where they help, not on every handler.
+extend-ignore = ["D"]
