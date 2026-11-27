@@ -73,7 +73,7 @@ from rellachat.usage import CallUsage, SttAudioMeter, UsageObserver
 
 AUDIO_IN_SAMPLE_RATE = 16000
 AUDIO_OUT_SAMPLE_RATE = 24000
-LLM_MAX_TOKENS = 400
+LLM_MAX_TOKENS = 200
 # Words the caller must say before the agent stops talking: one, so a "sí" or "espera" cuts it off
 # (interim transcripts count, so it stops as soon as the first word is recognized)
 INTERRUPT_MIN_WORDS = 1

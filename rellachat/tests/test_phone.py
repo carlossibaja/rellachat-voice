@@ -103,12 +103,12 @@ def telnyx_messages(stream_id="st-1", call_control_id="v2:ccid-1", encoding="PCM
 
 # ----------------------------------------------------------- WhatsApp prompts
 
-# sha256 of the WhatsApp prompts before phone calls existed (P1b): they must not change
+# sha256 of the WhatsApp prompts: phone calls (P1b) left them unchanged; the concise style rules updated them
 WHATSAPP_PROMPT_SHA256 = {
-    "inbound": "1a3faafedcb9dc116e7c7cdf84d235000abcc5f9c58c7acb8782bdd4cba7ed98",
-    "inbound_test": "d52d6455a2b07377ecb368ba7e0932031a5d7b2d906a3dc8379c3f4f7c7e3684",
-    "inbound_no_transfer": "282ad1dd2de6780393720e98a5a99f144c48c900a55e32373fd0c6e7a576db1f",
-    "outbound": "81825625c1e466eb3acdf1398121dfc421c0bd625d28771319118f9d215233bc",
+    "inbound": "745b4d182f713e667c315d2dcec32d07550d977033beaa686dd59ab44e1f7414",
+    "inbound_test": "cffeb06e6d5fa701b686bf591d3ad704cb21f808b2273377ed316964573672e6",
+    "inbound_no_transfer": "ac14daf8dc9f768157ec45a3106357f012c134ebb0c13155aa3bde95330e97c4",
+    "outbound": "c654cce48b3fe821b16c6def3085fd6f8903d692701a7b0ad95173f252ab52fa",
 }
 
 

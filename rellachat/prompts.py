@@ -27,7 +27,10 @@ VOICE_STYLE_RULES = """Reglas de estilo para voz (tus respuestas se convierten e
 - Lee los números, precios, fechas y horas de forma natural, como se dicen en voz alta.
 - No uses markdown, viñetas, listas, emojis ni símbolos especiales.
 - No inventes información. Si no sabes algo, dilo con honestidad.
-- Sé cordial, claro y breve. Evita respuestas de más de dos o tres oraciones."""
+- Sé cordial, claro y muy breve: una o dos oraciones cortas por turno, unas 25 palabras como máximo.
+- No repitas ni resumas lo que la persona acaba de decir; responde directamente.
+- No enumeres todas las opciones: ofrece como mucho dos o tres y pregunta cuál prefiere.
+- No preguntes si necesita algo más en cada turno; hazlo solo cuando la conversación esté por terminar."""
 
 
 CALENDAR_TOOLS = frozenset(

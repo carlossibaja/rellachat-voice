@@ -106,7 +106,7 @@ def test_outbound_prompt_tells_the_agent_it_is_calling_and_how_to_open():
 
 
 # sha256 of the outbound prompt below before call instructions existed (T9b)
-OUTBOUND_PROMPT_SHA256 = "8ebd05c9b158a9d0f2a714a87a00620e4b298d0054bd16189df165e05c9150f5"
+OUTBOUND_PROMPT_SHA256 = "31191e799f3e3ff8e0e743b2dccc5b506e4383813674b88149d777e763efbbfa"
 
 
 def test_agent_config_accepts_optional_call_instructions():
