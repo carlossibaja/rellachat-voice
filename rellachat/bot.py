@@ -73,7 +73,9 @@ from rellachat.usage import CallUsage, SttAudioMeter, UsageObserver
 
 AUDIO_IN_SAMPLE_RATE = 16000
 AUDIO_OUT_SAMPLE_RATE = 24000
-LLM_MAX_TOKENS = 200
+# Thinking counts toward this cap: at 200 the model sometimes spent it all thinking and replied with no
+# text (the agent went silent). Brevity comes from the prompt's style rules, not from this cap.
+LLM_MAX_TOKENS = 400
 # Words the caller must say before the agent stops talking: one, so a "sí" or "espera" cuts it off
 # (interim transcripts count, so it stops as soon as the first word is recognized)
 INTERRUPT_MIN_WORDS = 1
